@@ -249,6 +249,23 @@ func GetProvider(ctx context.Context) (*oidc.Provider, error) {
 	return provider, nil
 }
 
+// newOAuth2Config builds the oauth2 config. Without a client secret the client is a
+// public client (PKCE only): credentials go in the form body (client_id + code_verifier)
+// and no Authorization header is sent. Auto-detect would first try HTTP Basic with an
+// empty password, which providers such as Entra ID reject for public clients.
+func newOAuth2Config(clientID, clientSecret, redirectURL string, endpoint oauth2.Endpoint, scopes []string) *oauth2.Config {
+	if clientSecret == "" {
+		endpoint.AuthStyle = oauth2.AuthStyleInParams
+	}
+	return &oauth2.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		RedirectURL:  redirectURL,
+		Endpoint:     endpoint,
+		Scopes:       scopes,
+	}
+}
+
 // GetOAuth2Config returns the oauth2 configuration.
 func GetOAuth2Config(ctx context.Context) (*oauth2.Config, error) {
 	providerMutex.Lock()
@@ -280,13 +297,7 @@ func GetOAuth2Config(ctx context.Context) (*oauth2.Config, error) {
 		scopes = append(scopes, "profile", "email")
 	}
 
-	cfg := &oauth2.Config{
-		ClientID:     config.OIDCClientID,
-		ClientSecret: config.OIDCClientSecret,
-		RedirectURL:  config.OIDCRedirectURL,
-		Endpoint:     provider.Endpoint(),
-		Scopes:       scopes,
-	}
+	cfg := newOAuth2Config(config.OIDCClientID, config.OIDCClientSecret, config.OIDCRedirectURL, provider.Endpoint(), scopes)
 
 	// Store in global while holding lock to prevent double initialization
 	providerMutex.Lock()

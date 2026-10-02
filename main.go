@@ -274,6 +274,9 @@ func init() {
 		if err := oidc.ValidateConfig(); err != nil {
 			utils.WriteLog("fatal", fmt.Sprintf("OIDC configuration error: %v", err))
 		}
+		if config.OIDCClientSecret == "" {
+			utils.WriteLog("info", "OIDC running as a public client with PKCE (no client secret configured)")
+		}
 	}
 
 	// Validate ingestion auth configuration
