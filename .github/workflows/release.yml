@@ -11,6 +11,7 @@ permissions: {}
 
 jobs:
   release:
+    if: github.repository == 'falcosecurity/falcosidekick-ui'
     outputs:
       hashes: ${{ steps.hash.outputs.hashes }}
       tag_name: ${{ steps.tag.outputs.tag_name }}
@@ -93,6 +94,7 @@ jobs:
           echo "hashes=$(cat $checksum_file | base64 -w0)" >> "$GITHUB_OUTPUT"
 
   provenance:
+    if: github.repository == 'falcosecurity/falcosidekick-ui'
     needs: [release]
     permissions:
       actions: read # To read the workflow path.
