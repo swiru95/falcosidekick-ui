@@ -29,7 +29,7 @@ OpenID Connect authentication with support for any standard OIDC provider (Keycl
 
 **OIDC Implementation Notes:**
 - Session ID tokens are stored server-side in Redis for secure logout hint delivery (only the session ID is stored in cookies)
-- JWKS bearer tokens (when configured) are only sent to the IdP's JWKS endpoint for Kubernetes projected token scenarios; bearer credentials are not sent to other hosts
+- JWKS bearer tokens (when configured) are only sent over HTTPS (or HTTP with insecure-allow-http) to the issuer host and the host of the `jwks_uri` advertised by discovery (these differ on Kubernetes, e.g. issuer `kubernetes.default.svc.cluster.local` vs. API server address); bearer credentials are never sent to any other host
 - Ingestion endpoints (`/api/v1/` and `/api/v1/events/add`) remain unauthenticated by default; enable `INGEST_OIDC_*` variables to secure them with OIDC-based bearer token validation
 
 **Enable OIDC:**
