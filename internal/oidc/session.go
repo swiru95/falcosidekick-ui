@@ -19,12 +19,16 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/falcosecurity/falcosidekick-ui/configuration"
 	"github.com/gomodule/redigo/redis"
 )
+
+// ErrSessionExpired is returned when a session has exceeded idle timeout.
+var ErrSessionExpired = errors.New("session idle timeout exceeded")
 
 // Flow represents an OAuth2 flow state stored in Redis.
 type Flow struct {
@@ -148,7 +152,8 @@ func GetSession(conn redis.Conn, sessionID string) (*Session, error) {
 
 // RefreshSessionTTL updates the idle timeout for a session.
 // Refreshes when time.Since(session.LastSeen) >= min(60s, idle/4).
-// Returns an error if the session has exceeded idle timeout.
+// Returns ErrSessionExpired if the session has exceeded idle timeout.
+// Returns other errors for transient failures (e.g., Redis errors).
 func RefreshSessionTTL(conn redis.Conn, sessionID string) error {
 	config := configuration.GetConfiguration()
 	key := fmt.Sprintf("fsui:session:%s", HashID(sessionID))
@@ -157,8 +162,10 @@ func RefreshSessionTTL(conn redis.Conn, sessionID string) error {
 	data, err := redis.Bytes(conn.Do("GET", key))
 	if err != nil {
 		if err == redis.ErrNil {
-			return fmt.Errorf("session not found")
+			// Session not found (may have expired in Redis)
+			return ErrSessionExpired
 		}
+		// Transient Redis error: return without deleting
 		return fmt.Errorf("failed to get session: %w", err)
 	}
 
@@ -173,7 +180,7 @@ func RefreshSessionTTL(conn redis.Conn, sessionID string) error {
 	absoluteTTL := config.SessionTTL
 
 	if idleTTL > 0 && time.Since(session.LastSeen) > time.Duration(idleTTL)*time.Second {
-		return fmt.Errorf("session idle timeout exceeded")
+		return ErrSessionExpired
 	}
 
 	// Determine when to refresh: min(60s, idle/4)

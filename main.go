@@ -104,6 +104,24 @@ func init() {
 	      Auth mode: "basic"|"oidc"|"none" (default "basic", environment "FALCOSIDEKICK_UI_AUTH_MODE")
 	-d boolean
 	      Disable authentication (environment "FALCOSIDEKICK_UI_DISABLEAUTH")
+	-ingest-auth string
+	      Ingestion auth mode: "none"|"oidc" (default "none", environment "FALCOSIDEKICK_UI_INGEST_AUTH")
+	-ingest-oidc-allowed-clients string
+	      Ingestion OIDC allowed clients comma-separated (default "", environment "FALCOSIDEKICK_UI_INGEST_OIDC_ALLOWED_CLIENTS")
+	-ingest-oidc-allowed-subjects string
+	      Ingestion OIDC allowed subjects comma-separated (default "", environment "FALCOSIDEKICK_UI_INGEST_OIDC_ALLOWED_SUBJECTS")
+	-ingest-oidc-audience string
+	      Ingestion OIDC audience (default "", environment "FALCOSIDEKICK_UI_INGEST_OIDC_AUDIENCE")
+	-ingest-oidc-ca-file string
+	      Ingestion OIDC CA file path (default "", environment "FALCOSIDEKICK_UI_INGEST_OIDC_CA_FILE")
+	-ingest-oidc-insecure-allow-http boolean
+	      Allow HTTP for ingestion OIDC (dev only, environment "FALCOSIDEKICK_UI_INGEST_OIDC_INSECURE_ALLOW_HTTP")
+	-ingest-oidc-issuer string
+	      Ingestion OIDC issuer URL (default "", environment "FALCOSIDEKICK_UI_INGEST_OIDC_ISSUER")
+	-ingest-oidc-jwks-bearer-file string
+	      Ingestion OIDC JWKS bearer token file (default "", environment "FALCOSIDEKICK_UI_INGEST_OIDC_JWKS_BEARER_FILE")
+	-ingest-oidc-required-scope string
+	      Ingestion OIDC required scope (default "", environment "FALCOSIDEKICK_UI_INGEST_OIDC_REQUIRED_SCOPE")
 	-l string
 	      Log level: "debug", "info", "warning", "error" (default "info",  environment "FALCOSIDEKICK_UI_LOGLEVEL")
 	-oidc-allowed-groups string
@@ -171,13 +189,19 @@ func init() {
 		utils.WriteLog("fatal", "Failed to parse Listen Address")
 	}
 
+	// Normalize AUTH_MODE
+	*authMode = strings.ToLower(strings.TrimSpace(*authMode))
+
 	// Validate auth mode
 	if *authMode != authModeBasic && *authMode != authModeOIDC && *authMode != authModeNone {
 		utils.WriteLog("fatal", fmt.Sprintf("invalid auth mode: %s", *authMode))
 	}
 
-	// Handle -d (disable auth) overrides auth mode
+	// Handle -d (disable auth): if AUTH_MODE is explicitly set to something other than none, fatal
 	if *disableauth {
+		if *authMode != authModeNone {
+			utils.WriteLog("fatal", "DISABLEAUTH=true conflicts with AUTH_MODE set to something other than 'none'")
+		}
 		*authMode = "none"
 	}
 
@@ -321,7 +345,6 @@ func main() {
 		return c.Redirect(http.StatusPermanentRedirect, "docs/")
 	})
 	e.Static("/*", "frontend/dist").Name = "webui-home"
-	e.POST("/", api.AddEvent).Name = AddEvent // for compatibility with old Falcosidekicks
 
 	apiRoute := e.Group("/api/v1")
 
@@ -363,24 +386,15 @@ func main() {
 		apiRoute.POST("/authenticate", api.Authenticate).Name = routeNameAuthenticate
 	}
 
-	// Apply ingestion bearer token middleware to POST routes if enabled
-	var ingestMiddleware echo.MiddlewareFunc
+	// Build ingest middleware slice (empty when ingest auth is off)
+	var ingestMW []echo.MiddlewareFunc
 	if config.IngestAuth == authModeOIDC {
-		ingestMiddleware = oidc.IngestBearerMiddleware()
+		ingestMW = append(ingestMW, oidc.IngestBearerMiddleware())
 	}
 
-	// Register ingestion endpoints with bearer token auth middleware
-	if ingestMiddleware != nil {
-		e.POST("/", api.AddEvent, ingestMiddleware).Name = AddEvent
-	} else {
-		e.POST("/", api.AddEvent).Name = AddEvent
-	}
-
-	if ingestMiddleware != nil {
-		apiRoute.POST("/", api.AddEvent, ingestMiddleware).Name = AddEvent
-	} else {
-		apiRoute.POST("/", api.AddEvent).Name = AddEvent
-	}
+	// Register ingestion endpoints exactly ONCE with middleware slice
+	e.POST("/", api.AddEvent, ingestMW...).Name = AddEvent
+	apiRoute.POST("/", api.AddEvent, ingestMW...).Name = AddEvent
 
 	apiRoute.GET("/config", api.GetConfiguration).Name = "get-configuration"
 	apiRoute.GET("/configuration", api.GetConfiguration).Name = "get-configuration"
@@ -389,11 +403,7 @@ func main() {
 	apiRoute.GET("/outputs", api.GetOutputs).Name = "list-outputs"
 
 	eventsRoute := apiRoute.Group("/events")
-	if ingestMiddleware != nil {
-		eventsRoute.POST("/add", api.AddEvent, ingestMiddleware).Name = AddEvent
-	} else {
-		eventsRoute.POST("/add", api.AddEvent).Name = AddEvent
-	}
+	eventsRoute.POST("/add", api.AddEvent, ingestMW...).Name = AddEvent
 	eventsRoute.GET("/count", api.CountEvent).Name = "count-events"
 	eventsRoute.GET("/count/:groupby", api.CountByEvent).Name = "count-events-by"
 	eventsRoute.GET("/search", api.Search).Name = "search-keys"

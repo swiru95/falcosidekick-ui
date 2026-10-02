@@ -15,6 +15,7 @@ limitations under the License.
 package oidc
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
@@ -105,8 +106,11 @@ func SessionMiddleware() echo.MiddlewareFunc {
 
 			// Refresh idle timeout
 			if err := RefreshSessionTTL(conn, sessionCookie.Value); err != nil {
-				// Idle timeout exceeded or other session error
-				DeleteSession(conn, sessionCookie.Value)
+				// Only delete on ErrSessionExpired; on transient Redis errors, keep session
+				if errors.Is(err, ErrSessionExpired) {
+					DeleteSession(conn, sessionCookie.Value)
+				}
+				// Return 401 on any error (session expired or transient Redis error)
 				c.Response().Header().Set("Content-Type", "application/json")
 				c.Response().Header().Set("Cache-Control", "no-store")
 				c.Response().Header().Set("Pragma", "no-cache")

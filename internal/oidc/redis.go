@@ -69,6 +69,8 @@ func getConnPool() (*redis.Pool, error) {
 	// Validate the host:port address
 	host, port, err := net.SplitHostPort(config.RedisServer)
 	if err != nil {
+		// If SplitHostPort fails, the input has no port; use the input as host
+		host = config.RedisServer
 		port = "6379"
 	}
 	if host == "" {

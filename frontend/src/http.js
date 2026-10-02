@@ -145,6 +145,15 @@ export const requests = {
       },
     });
   },
+  logout() {
+    return api.request({
+      url: '/auth/logout',
+      method: 'post',
+      headers: {
+        'X-Requested-With': 'XMLHttpRequest',
+      },
+    });
+  },
 };
 
 export default {

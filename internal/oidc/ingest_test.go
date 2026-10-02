@@ -862,3 +862,55 @@ func resetIngestProvider() {
 	defer ingestProviderMutex.Unlock()
 	cachedIngestProvider = nil
 }
+
+// TestIsInAllowlistEmptyTrailingComma tests that trailing commas create empty entries that are skipped.
+//
+//nolint:goconst
+func TestIsInAllowlistEmptyTrailingComma(t *testing.T) {
+	// "svc," splits to ["svc", ""], should skip the empty entry
+	tests := []struct {
+		value      string
+		allowlist  string
+		shouldPass bool
+	}{
+		{"svc", "svc,", true}, // "svc" is in allowlist
+		{"", "svc,", false},   // Empty value never matches
+		{"", "svc,,", false},  // Empty value never matches, even with multiple empty entries
+		{"svc", "svc,,user", true},
+		{"user", ",svc,user", true}, // Empty at start
+		{"other", "svc,", false},    // "other" not in allowlist
+	}
+
+	for _, tc := range tests {
+		result := isInAllowlist(tc.value, tc.allowlist)
+		if result != tc.shouldPass {
+			t.Errorf("isInAllowlist(%q, %q) = %v, want %v", tc.value, tc.allowlist, result, tc.shouldPass)
+		}
+	}
+}
+
+// TestIsUserInAllowedGroupsEmptyEntries tests group matching with empty entries after split/trim.
+//
+//nolint:goconst
+func TestIsUserInAllowedGroupsEmptyEntries(t *testing.T) {
+	tests := []struct {
+		userGroups []string
+		allowlist  string
+		shouldPass bool
+	}{
+		{[]string{"admins"}, "admins,users", true},  // "admins" is in allowlist
+		{[]string{""}, "admins,users", false},       // Empty group value never matches
+		{[]string{"admins"}, "admins,", true},       // "admins" is in allowlist, trailing comma creates empty entry which is skipped
+		{[]string{"user"}, ",user,admin", true},     // User in middle of allowlist with empty entries
+		{[]string{"admin", "user"}, "admin", true},  // First group matches
+		{[]string{"", "admin"}, "admin,user", true}, // Empty group skipped, second group matches
+		{[]string{"other"}, "admin,user", false},    // No match
+	}
+
+	for _, tc := range tests {
+		result := isUserInAllowedGroups(tc.userGroups, tc.allowlist)
+		if result != tc.shouldPass {
+			t.Errorf("isUserInAllowedGroups(%v, %q) = %v, want %v", tc.userGroups, tc.allowlist, result, tc.shouldPass)
+		}
+	}
+}

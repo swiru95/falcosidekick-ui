@@ -50,13 +50,11 @@ func RegisterRoutes(g *echo.Group) {
 
 	// In OIDC mode, basic auth endpoints return 404
 	g.POST("/auth", func(c echo.Context) error {
-		c.Response().Header().Set("Cache-Control", "no-store")
-		c.Response().Header().Set("Pragma", "no-cache")
+		noStore(c)
 		return echo.NewHTTPError(http.StatusNotFound)
 	}).Name = routeNameAuth
 	g.POST("/authenticate", func(c echo.Context) error {
-		c.Response().Header().Set("Cache-Control", "no-store")
-		c.Response().Header().Set("Pragma", "no-cache")
+		noStore(c)
 		return echo.NewHTTPError(http.StatusNotFound)
 	}).Name = routeNameAuth
 }
@@ -82,6 +80,14 @@ const (
 const (
 	errorUnauthenticated = "unauthenticated"
 	errorUnauthorized    = "unauthorized"
+)
+
+// HTTP scheme constants
+//
+//nolint:goconst
+const (
+	schemeHTTPS = "https"
+	schemeHTTP  = "http"
 )
 
 // setCookie sets a cookie with consistent security attributes.
@@ -164,7 +170,7 @@ func Login(c echo.Context) error {
 		oauth2.S256ChallengeOption(verifier),
 	)
 
-	// Add nonce as a custom parameter (not standard oauth2.Option)
+	// Add nonce as a URL parameter
 	if strings.Contains(authURL, "?") {
 		authURL += fmt.Sprintf("&nonce=%s", nonce)
 	} else {
@@ -206,10 +212,22 @@ func Callback(c echo.Context) error {
 	if err != nil && config.OIDCInsecureAllowHTTP {
 		cookie, err = c.Cookie("fsui_oidc_flow")
 	}
+
+	// Determine flow cookie name for clearing
+	flowCookieName := "__Host-fsui_oidc_flow"
+	if config.OIDCInsecureAllowHTTP {
+		flowCookieName = "fsui_oidc_flow"
+	}
+
+	// Clear flow cookie at the very START if present (before GetFlow)
+	if err == nil && cookie != nil {
+		setCookie(c, flowCookieName, "", -1, config)
+	}
+
 	if err != nil {
 		c.Response().Header().Set("Cache-Control", "no-store")
 		c.Response().Header().Set("Pragma", "no-cache")
-		return echo.NewHTTPError(http.StatusBadRequest, "missing flow cookie")
+		return c.Redirect(http.StatusFound, getAppBase(config.OIDCRedirectURL)+"#/login?error=sso_failed")
 	}
 
 	// Get flow from Redis
@@ -229,13 +247,6 @@ func Callback(c echo.Context) error {
 		c.Response().Header().Set("Pragma", "no-cache")
 		return c.Redirect(http.StatusFound, getAppBase(config.OIDCRedirectURL)+"#/login?error=sso_failed")
 	}
-
-	// N3: Clear flow cookie immediately after reading it (on every path, success or failure)
-	flowCookieName := "__Host-fsui_oidc_flow"
-	if config.OIDCInsecureAllowHTTP {
-		flowCookieName = "fsui_oidc_flow"
-	}
-	setCookie(c, flowCookieName, "", -1, config)
 
 	// Check for error from IdP
 	// L5: Validate error parameter format before logging
@@ -441,10 +452,12 @@ func Logout(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request")
 	}
 
-	// Verify origin if present
+	// Verify origin if present, using X-Requested-With as fallback
 	if origin := c.Request().Header.Get("Origin"); origin != "" {
 		redirectOrigin := extractOrigin(config.OIDCRedirectURL)
-		if subtle.ConstantTimeCompare([]byte(origin), []byte(redirectOrigin)) != 1 {
+		// Normalize origin for comparison (case-insensitive host, default ports)
+		normalizedOrigin := extractOrigin(origin)
+		if subtle.ConstantTimeCompare([]byte(normalizedOrigin), []byte(redirectOrigin)) != 1 {
 			return echo.NewHTTPError(http.StatusBadRequest, "origin mismatch")
 		}
 	}
@@ -564,6 +577,12 @@ func Me(c echo.Context) error {
 
 // Helper functions
 
+// noStore sets Cache-Control and Pragma headers to prevent caching.
+func noStore(c echo.Context) {
+	c.Response().Header().Set("Cache-Control", "no-store")
+	c.Response().Header().Set("Pragma", "no-cache")
+}
+
 func extractClaims(idToken interface{ Claims(v interface{}) error }) (username, email string, groups []string) {
 	config := configuration.GetConfiguration()
 
@@ -611,14 +630,20 @@ func extractClaims(idToken interface{ Claims(v interface{}) error }) (username, 
 }
 
 func isUserInAllowedGroups(userGroups []string, allowedGroupsStr string) bool {
-	allowedGroups := strings.Split(allowedGroupsStr, ",")
-	for i := range allowedGroups {
-		allowedGroups[i] = strings.TrimSpace(allowedGroups[i])
-	}
-
+	// Reject empty group values in user's groups
 	for _, userGroup := range userGroups {
+		if userGroup == "" {
+			continue
+		}
+		// Check if this group is in allowlist
+		allowedGroups := strings.Split(allowedGroupsStr, ",")
 		for _, allowedGroup := range allowedGroups {
-			if userGroup == allowedGroup {
+			trimmed := strings.TrimSpace(allowedGroup)
+			// Skip empty entries after trim
+			if trimmed == "" {
+				continue
+			}
+			if userGroup == trimmed {
 				return true
 			}
 		}
@@ -636,13 +661,34 @@ func getAppBase(redirectURL string) string {
 	return redirectURL
 }
 
-func extractOrigin(url string) string {
-	// Extract scheme and host from URL
-	parts := strings.Split(url, "/")
-	if len(parts) >= 3 {
-		return parts[0] + "//" + parts[2]
+func extractOrigin(urlStr string) string {
+	// Parse URL and normalize with default ports
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return urlStr
 	}
-	return url
+
+	host := u.Hostname()
+	port := u.Port()
+
+	// Normalize ports: omit default ports
+	if port == "" {
+		if u.Scheme == schemeHTTPS {
+			port = "443"
+		} else if u.Scheme == schemeHTTP {
+			port = "80"
+		}
+	}
+
+	// Only include port if it's non-default
+	isDefaultPort := (u.Scheme == schemeHTTPS && port == "443") ||
+		(u.Scheme == schemeHTTP && port == "80")
+
+	if isDefaultPort {
+		return u.Scheme + "://" + strings.ToLower(host)
+	}
+
+	return u.Scheme + "://" + strings.ToLower(host) + ":" + port
 }
 
 // isValidOIDCErrorCode validates error code format per OAuth 2.0 / OpenID Connect specs.

@@ -40,6 +40,7 @@ type bearerTokenRoundTripper struct {
 	issuerHost        string
 	tokenFilePath     string
 	lastModTime       time.Time
+	lastCheck         time.Time
 	cachedToken       string
 	mu                sync.Mutex
 	insecureAllowHTTP bool
@@ -51,6 +52,7 @@ func (b *bearerTokenRoundTripper) RoundTrip(req *http.Request) (*http.Response, 
 
 	// Add Authorization header if request is to issuer host
 	// Only allow HTTPS by default, or HTTP if InsecureAllowHTTP is set
+	//nolint:goconst
 	isSecure := req.URL.Scheme == "https" || (b.insecureAllowHTTP && req.URL.Scheme == "http")
 	if req.URL.Host == b.issuerHost && isSecure {
 		token := b.getToken()
@@ -66,11 +68,15 @@ func (b *bearerTokenRoundTripper) getToken() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	// Stat file at most every 30s
 	now := time.Now()
-	if now.Sub(b.lastModTime) < 30*time.Second && b.cachedToken != "" {
+
+	// Only stat the file at most every 30s based on lastCheck
+	if now.Sub(b.lastCheck) < 30*time.Second {
 		return b.cachedToken
 	}
+
+	// Update lastCheck timestamp
+	b.lastCheck = now
 
 	// Try to read and stat the file
 	stat, err := os.Stat(b.tokenFilePath)
@@ -312,10 +318,6 @@ func GetIDTokenVerifier(ctx context.Context) (*oidc.IDTokenVerifier, error) {
 // getIngestProvider returns the cached ingestion OIDC provider or initializes it.
 // It's lazy and thread-safe, separate from the login provider.
 func getIngestProvider(ctx context.Context) (*oidc.Provider, error) {
-	if cachedIngestProvider != nil {
-		return cachedIngestProvider, nil
-	}
-
 	ingestProviderMutex.Lock()
 	defer ingestProviderMutex.Unlock()
 

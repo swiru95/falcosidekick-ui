@@ -51,9 +51,9 @@
 </template>
 
 <script>
-import axios from 'axios';
 import { mapActions } from 'vuex';
 import Counters from './components/counters.vue';
+import { requests } from './http';
 
 export default {
   name: 'App',
@@ -116,14 +116,7 @@ export default {
     logout() {
       if (this.$store.state.authMode === 'oidc') {
         // OIDC logout
-        const api = axios.create({
-          baseURL: `${process.env.NODE_ENV === 'production' ? `//${window.location.host}${window.location.pathname}` : process.env.VUE_APP_API}api/v1`,
-        });
-        api.post('/auth/logout', {}, {
-          headers: {
-            'X-Requested-With': 'XMLHttpRequest',
-          },
-        })
+        requests.logout()
           .then((response) => {
             this.clearSSO();
             if (response.data.logout_url) {
@@ -132,9 +125,13 @@ export default {
               this.$router.push('/login');
             }
           })
-          .catch(() => {
-            this.clearSSO();
-            this.$router.push('/login');
+          .catch((error) => {
+            // Show error message but don't clear state on failure
+            let errorMsg = 'Logout failed. Please try again.';
+            if (error.response && error.response.data && error.response.data.error) {
+              errorMsg = error.response.data.error;
+            }
+            alert(`Logout error: ${errorMsg}`);
           });
       } else {
         // Basic auth logout

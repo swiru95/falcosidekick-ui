@@ -160,3 +160,77 @@ func TestErrorCodeValidation(t *testing.T) {
 		}
 	}
 }
+
+// TestIngestRoutesProtectionOIDC tests that ingest routes are protected when INGEST_AUTH=oidc.
+func TestIngestRoutesProtectionOIDC(t *testing.T) {
+	issuer, server := setupTestIssuer()
+	defer server.Close()
+	resetIngestProvider()
+	defer resetIngestProvider()
+
+	setupIngestConfig(ingestTestAuthModeOIDC, issuer.Issuer, ingestTestAudience, "", "", "", "")
+
+	e := echo.New()
+	g := e.Group("/api/v1")
+
+	// Register routes like main.go does
+	handlerCalled := false
+	handler := func(c echo.Context) error {
+		handlerCalled = true
+		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
+	}
+
+	// Build middleware slice as in main.go
+	var ingestMW []echo.MiddlewareFunc
+	if configuration.GetConfiguration().IngestAuth == authModeOIDC {
+		ingestMW = append(ingestMW, IngestBearerMiddleware())
+	}
+
+	// Register the three ingest routes exactly once
+	const routeNameAddEvent = "add-event"
+	e.POST("/", handler, ingestMW...).Name = routeNameAddEvent
+	g.POST("/", handler, ingestMW...).Name = routeNameAddEvent
+	eventsRoute := g.Group("/events")
+	eventsRoute.POST("/add", handler, ingestMW...).Name = routeNameAddEvent
+
+	// Test all three routes without token → should get 401
+	routes := []string{"/", "/api/v1/", "/api/v1/events/add"}
+	for _, route := range routes {
+		t.Run("POST "+route+" without token", func(t *testing.T) {
+			handlerCalled = false
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, route, nil))
+
+			if handlerCalled {
+				t.Errorf("handler should not be called without token at %s", route)
+			}
+			if rec.Code != http.StatusUnauthorized {
+				t.Errorf("expected 401 at %s, got %d", route, rec.Code)
+			}
+		})
+	}
+
+	// Test with valid token → should get 200
+	token, _ := issuer.SignToken(map[string]interface{}{
+		claimSub: ingestTestUserID,
+		claimAud: ingestTestAudience,
+		claimExp: 9999999999,
+	})
+
+	for _, route := range routes {
+		t.Run("POST "+route+" with token", func(t *testing.T) {
+			handlerCalled = false
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, route, nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			e.ServeHTTP(rec, req)
+
+			if !handlerCalled {
+				t.Errorf("handler should be called with token at %s", route)
+			}
+			if rec.Code != http.StatusOK {
+				t.Errorf("expected 200 at %s, got %d", route, rec.Code)
+			}
+		})
+	}
+}

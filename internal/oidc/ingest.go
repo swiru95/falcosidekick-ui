@@ -198,11 +198,21 @@ func getJOSEHeaderTyp(tokenString string) (string, error) {
 	return "", nil
 }
 
-// isInAllowlist checks if a value is in a comma-separated allowlist
+// isInAllowlist checks if a value is in a comma-separated allowlist.
+// Rejects empty entries and never matches an empty value.
 func isInAllowlist(value, allowlistStr string) bool {
+	// Never match empty value
+	if value == "" {
+		return false
+	}
 	allowlist := strings.Split(allowlistStr, ",")
 	for _, item := range allowlist {
-		if strings.TrimSpace(item) == value {
+		trimmed := strings.TrimSpace(item)
+		// Skip empty entries after trim
+		if trimmed == "" {
+			continue
+		}
+		if trimmed == value {
 			return true
 		}
 	}
