@@ -26,7 +26,9 @@
         ></v-select>
       </template>
       <v-spacer/>
-      <Counters v-if="$store.state.username && $store.state.password"></Counters>
+      <Counters
+        v-if="($store.state.username && $store.state.password) || $store.state.ssoUser"
+      ></Counters>
     </v-app-bar>
     <v-main>
       <router-view></router-view>
@@ -38,8 +40,8 @@
         2023 - <a href="https://github.com/falcosecurity/falcosidekick-ui">Falco Authors</a>
       </span>
       <v-spacer/>
-      <span v-if="$store.state.username && $store.state.password">
-        logged as <b>{{$store.state.username}}</b>
+      <span v-if="($store.state.username && $store.state.password) || $store.state.ssoUser">
+        logged as <b>{{$store.state.ssoUser || $store.state.username}}</b>
         <v-btn text x-small class="ml-3" @click="logout">
           Logout
         </v-btn>
@@ -49,6 +51,7 @@
 </template>
 
 <script>
+import axios from 'axios';
 import { mapActions } from 'vuex';
 import Counters from './components/counters.vue';
 
@@ -107,11 +110,37 @@ export default {
     ...mapActions([
       'increment',
       'setRefreshInterval',
+      'clearSSO',
+      'emptyCredentials',
     ]),
     logout() {
-      this.$store.state.username = '';
-      this.$store.state.password = '';
-      this.$router.push('/login');
+      if (this.$store.state.authMode === 'oidc') {
+        // OIDC logout
+        const api = axios.create({
+          baseURL: `${process.env.NODE_ENV === 'production' ? `//${window.location.host}${window.location.pathname}` : process.env.VUE_APP_API}api/v1`,
+        });
+        api.post('/auth/logout', {}, {
+          headers: {
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+        })
+          .then((response) => {
+            this.clearSSO();
+            if (response.data.logout_url) {
+              window.location.assign(response.data.logout_url);
+            } else {
+              this.$router.push('/login');
+            }
+          })
+          .catch(() => {
+            this.clearSSO();
+            this.$router.push('/login');
+          });
+      } else {
+        // Basic auth logout
+        this.emptyCredentials();
+        this.$router.push('/login');
+      }
     },
     cancelAutoUpdate() {
       clearInterval(this.timer);

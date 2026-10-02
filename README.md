@@ -15,6 +15,191 @@ Events are stored in a `Redis` server with [`Redisearch`](https://github.com/Red
 
 ## Usage
 
+### Authentication
+
+The UI supports three authentication modes:
+
+#### Basic Authentication (default)
+Traditional HTTP Basic Auth. Set username/password via `-u` flag or `FALCOSIDEKICK_UI_USER` environment variable.
+
+#### OIDC/SSO
+OpenID Connect authentication with support for any standard OIDC provider (Keycloak, Dex, Authentik, Okta, Entra ID, Google, etc.).
+
+**Enable OIDC:**
+```bash
+./falcosidekick-ui -auth-mode oidc \
+  -oidc-issuer https://idp.example.com \
+  -oidc-client-id myapp \
+  -oidc-client-secret secret \
+  -oidc-redirect-url https://ui.example.com/api/v1/auth/oidc/callback
+```
+
+**With internal CA:**
+```bash
+./falcosidekick-ui -auth-mode oidc \
+  -oidc-issuer https://idp.example.com \
+  -oidc-client-id myapp \
+  -oidc-client-secret secret \
+  -oidc-redirect-url https://ui.example.com/api/v1/auth/oidc/callback \
+  -oidc-ca-file /etc/ssl/certs/ca-bundle.pem
+```
+
+**Keycloak Example:**
+```bash
+./falcosidekick-ui -auth-mode oidc \
+  -oidc-issuer https://keycloak.example.com/realms/myrealm \
+  -oidc-client-id falcosidekick-ui \
+  -oidc-client-secret <confidential-client-secret> \
+  -oidc-redirect-url https://ui.example.com/api/v1/auth/oidc/callback \
+  -oidc-scopes openid,profile,email \
+  -oidc-username-claim preferred_username \
+  -oidc-groups-claim groups \
+  -oidc-allowed-groups admins,operators
+```
+
+**Kubernetes with Keycloak:**
+```bash
+./falcosidekick-ui -auth-mode oidc \
+  -oidc-issuer https://keycloak.example.com/realms/myrealm \
+  -oidc-client-id falcosidekick-ui \
+  -oidc-client-secret-file /run/secrets/oidc_client_secret \
+  -oidc-redirect-url https://ui.example.com/api/v1/auth/oidc/callback
+```
+
+Keycloak realm settings:
+- Create a "confidential" client with "Standard flow" and "PKCE method: S256" enabled
+- Set valid redirect URI to: `https://ui.example.com/api/v1/auth/oidc/callback`
+- Add a groups mapper to include user groups in ID token
+
+**Dex Example:**
+Dex is a lightweight OpenID Connect provider ideal for development and testing.
+
+```bash
+./falcosidekick-ui -auth-mode oidc \
+  -oidc-issuer https://dex.example.com \
+  -oidc-client-id falcosidekick-ui \
+  -oidc-client-secret <dex-client-secret> \
+  -oidc-redirect-url https://ui.example.com/api/v1/auth/oidc/callback \
+  -oidc-scopes openid,profile,email
+```
+
+Dex configuration (example Dex config.yaml):
+```yaml
+issuer: https://dex.example.com
+storage:
+  type: memory
+oauth2:
+  skipApprovalScreen: true
+staticClients:
+- id: falcosidekick-ui
+  redirectURIs:
+  - 'https://ui.example.com/api/v1/auth/oidc/callback'
+  name: 'Falcosidekick UI'
+  secret: <dex-client-secret>
+staticPasswords:
+- email: admin@example.com
+  hash: $2a$10$N7yBV... (bcrypt hash of password)
+  username: admin
+  userID: <uuid>
+```
+
+#### No Authentication
+Disable all authentication:
+```bash
+./falcosidekick-ui -d
+```
+
+#### Event Ingestion Authentication (Optional)
+By default, event ingestion endpoints (`POST /`, `POST /api/v1/`, `POST /api/v1/events/add`) are **unauthenticated** and publicly accessible. 
+Optional OIDC-based bearer token authentication can be enabled to secure event ingestion from Falcosidekick backends.
+This is independent of UI login mode and allows fine-grained access control for event ingestion.
+
+**Disabling event ingestion authentication (default):**
+```bash
+./falcosidekick-ui -ingest-auth none  # or omit the flag
+```
+Event ingestion endpoints are accessible without authentication.
+
+**Enabling event ingestion authentication:**
+```bash
+./falcosidekick-ui -ingest-auth oidc \
+  -ingest-oidc-issuer https://idp.example.com \
+  -ingest-oidc-audience falcosidekick-backend \
+  -ingest-oidc-allowed-subjects falcosidekick-service
+```
+
+**Environment Variables:**
+
+| Variable | Required | Default | Description |
+| :------- | :------: | :------ | :---------- |
+| `FALCOSIDEKICK_UI_INGEST_AUTH` | No | `none` | Set to `oidc` to enable bearer token authentication, `none` for unauthenticated access |
+| `FALCOSIDEKICK_UI_INGEST_OIDC_ISSUER` | Yes* | - | OIDC provider issuer URL (must be reachable) |
+| `FALCOSIDEKICK_UI_INGEST_OIDC_AUDIENCE` | Yes* | - | Expected audience in token (unique identifier for this integration) |
+| `FALCOSIDEKICK_UI_INGEST_OIDC_ALLOWED_SUBJECTS` | No | - | Comma-separated allowlist of subject claims (e.g., `user1,user2`) |
+| `FALCOSIDEKICK_UI_INGEST_OIDC_ALLOWED_CLIENTS` | No | - | Comma-separated allowlist of client IDs/authorized parties (e.g., `client1,client2`) |
+| `FALCOSIDEKICK_UI_INGEST_OIDC_REQUIRED_SCOPE` | No | - | Required scope name in token (space-separated, checked in `scope` or `scp` claim) |
+| `FALCOSIDEKICK_UI_INGEST_OIDC_CA_FILE` | No | - | Path to custom CA certificate for OIDC discovery (PEM format) |
+| `FALCOSIDEKICK_UI_INGEST_OIDC_JWKS_BEARER_FILE` | No | - | Path to file containing bearer token for JWKS endpoint access (if protected) |
+| `FALCOSIDEKICK_UI_INGEST_OIDC_INSECURE_ALLOW_HTTP` | No | `false` | Allow HTTP (insecure) OIDC issuer URLs for development/testing only (default: HTTPS required) |
+
+**Session Configuration (OIDC mode):**
+
+| Variable | Required | Default | Description |
+| :------- | :------: | :------ | :---------- |
+| `FALCOSIDEKICK_UI_SESSION_TTL` | No | `28800` (8h) | Session absolute lifetime in seconds (must be > 0 in OIDC mode) |
+| `FALCOSIDEKICK_UI_SESSION_IDLE_TIMEOUT` | No | `3600` (1h) | Session idle timeout in seconds; sessions expire if idle for this duration (must be > 0 in OIDC mode) |
+
+*Required only if `FALCOSIDEKICK_UI_INGEST_AUTH=oidc`
+
+**At least one authorization check must be configured** (allowed subjects, allowed clients, or required scope) when `FALCOSIDEKICK_UI_INGEST_AUTH=oidc`.
+
+**Keycloak Client-Credentials Example:**
+```bash
+./falcosidekick-ui -auth-mode oidc \
+  -oidc-issuer https://keycloak.example.com/realms/myrealm \
+  -oidc-client-id falcosidekick-ui \
+  -oidc-client-secret <client-secret> \
+  -oidc-redirect-url https://ui.example.com/api/v1/auth/oidc/callback \
+  -ingest-auth oidc \
+  -ingest-oidc-issuer https://keycloak.example.com/realms/myrealm \
+  -ingest-oidc-audience falcosidekick-backend \
+  -ingest-oidc-allowed-clients falcosidekick-backend-service
+```
+
+Configure Keycloak:
+1. Create a "confidential" client for backend ingestion (e.g., `falcosidekick-backend-service`)
+2. Enable "Client Credentials" authentication flow
+3. Add an "Audience" mapper to include the audience in the token (set to `falcosidekick-backend`)
+4. Generate a client secret and use it in your Falcosidekick backend configuration
+
+**Kubernetes Projected Service Account Token Example:**
+```bash
+./falcosidekick-ui -auth-mode oidc \
+  -oidc-issuer https://kubernetes.default.svc \
+  -oidc-client-id falcosidekick-ui \
+  -oidc-client-secret <client-secret> \
+  -oidc-redirect-url https://ui.example.com/api/v1/auth/oidc/callback \
+  -ingest-auth oidc \
+  -ingest-oidc-issuer https://kubernetes.default.svc \
+  -ingest-oidc-audience falcosidekick-ingestion \
+  -ingest-oidc-ca-file /var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
+  -ingest-oidc-allowed-subjects system:serviceaccount:falco:falcosidekick
+```
+
+Configure Kubernetes:
+1. Ensure your cluster has `--service-account-issuer` flag set (typically `https://kubernetes.default.svc`)
+2. Verify `system:service-account-issuer-discovery` role is bound to allow public OIDC discovery
+3. Create a ServiceAccount in the `falco` namespace for Falcosidekick backend
+4. Project its token to the Pod (use `projected` volumes in PodSpec)
+5. Configure Falcosidekick backend to use the projected token and send it in the `Authorization: Bearer <token>` header
+
+**Integration with Falcosidekick:**
+Configure your Falcosidekick backend to authenticate ingestion requests. Refer to Falcosidekick's WebUI output plugin configuration:
+- `webui.oauth2.enabled`: Enable OAuth2 authentication for WebUI output
+- `webui.oauth2.issuer`: OIDC issuer URL (should match `FALCOSIDEKICK_UI_INGEST_OIDC_ISSUER`)
+- `webui.oauth2.audience`: OAuth2 audience (should match `FALCOSIDEKICK_UI_INGEST_OIDC_AUDIENCE`)
+- `webui.tokenfile`: Path to file containing bearer token for ingestion requests
+
 ### Options
 #### Precedence: flag value -> environment variable value -> default value
 
