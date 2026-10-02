@@ -43,49 +43,11 @@ type CustomValidator struct {
 
 const AddEvent = "add-event"
 
-// Auth mode constants
-const (
-	authModeBasic = "basic"
-	authModeOIDC  = "oidc"
-	authModeNone  = "none"
-)
-
 // Route name constants
 const (
 	routeNameAuthMe       = "auth-me"
 	routeNameAuthenticate = "authenticate"
 )
-
-// resolveAuthMode resolves the final auth mode based on raw input and disableAuth flag.
-// Logic:
-// - raw = strings.ToLower(strings.TrimSpace(raw))
-// - disableAuth && raw == "" → "none"
-// - disableAuth && raw == "none" → "none"
-// - disableAuth && raw is anything else → error (conflict)
-// - !disableAuth && raw == "" → "basic"
-// - raw in {basic, oidc, none} → raw; otherwise → error "invalid auth mode"
-func resolveAuthMode(raw string, disableAuth bool) (string, error) {
-	raw = strings.ToLower(strings.TrimSpace(raw))
-
-	if disableAuth {
-		if raw == "" || raw == authModeNone {
-			return authModeNone, nil
-		}
-		return "", fmt.Errorf("DISABLEAUTH=true conflicts with AUTH_MODE set to something other than 'none'")
-	}
-
-	// disableAuth is false
-	if raw == "" {
-		return authModeBasic, nil
-	}
-
-	// Validate that raw is one of the valid modes
-	if raw == authModeBasic || raw == authModeOIDC || raw == authModeNone {
-		return raw, nil
-	}
-
-	return "", fmt.Errorf("invalid auth mode: %s", raw)
-}
 
 func init() {
 	addr := utils.GetStringFlagOrEnvParam("a", "FALCOSIDEKICK_UI_ADDR", "0.0.0.0", "Listen Address")
@@ -221,7 +183,7 @@ func init() {
 	}
 
 	// Resolve and validate auth mode
-	resolvedAuthMode, err := resolveAuthMode(*authMode, *disableauth)
+	resolvedAuthMode, err := configuration.ResolveAuthMode(*authMode, *disableauth)
 	if err != nil {
 		utils.WriteLog("fatal", err.Error())
 	}
@@ -246,7 +208,7 @@ func init() {
 	config.AuthMode = *authMode
 
 	// Set DisableAuth when auth mode is "none"
-	if config.AuthMode == authModeNone {
+	if config.AuthMode == configuration.AuthModeNone {
 		config.DisableAuth = true
 	}
 
@@ -270,12 +232,12 @@ func init() {
 	config.IngestAuth = strings.ToLower(strings.TrimSpace(*ingestAuth))
 
 	// Validate ingestion auth mode
-	if config.IngestAuth != authModeNone && config.IngestAuth != authModeOIDC {
+	if config.IngestAuth != configuration.AuthModeNone && config.IngestAuth != configuration.AuthModeOIDC {
 		utils.WriteLog("fatal", fmt.Sprintf("invalid ingest auth mode: %s (must be 'none' or 'oidc')", *ingestAuth))
 	}
 
 	// Validate SESSION_TTL and IDLE_TIMEOUT when OIDC is enabled
-	if config.AuthMode == authModeOIDC {
+	if config.AuthMode == configuration.AuthModeOIDC {
 		if config.SessionTTL == 0 {
 			utils.WriteLog("fatal", "invalid SESSION_TTL: must be a valid duration (e.g., '8h')")
 		}
@@ -308,14 +270,14 @@ func init() {
 	}
 
 	// Validate OIDC configuration if in oidc mode
-	if config.AuthMode == authModeOIDC {
+	if config.AuthMode == configuration.AuthModeOIDC {
 		if err := oidc.ValidateConfig(); err != nil {
 			utils.WriteLog("fatal", fmt.Sprintf("OIDC configuration error: %v", err))
 		}
 	}
 
 	// Validate ingestion auth configuration
-	if config.IngestAuth == authModeOIDC {
+	if config.IngestAuth == configuration.AuthModeOIDC {
 		if err := oidc.ValidateIngestConfig(); err != nil {
 			utils.WriteLog("fatal", fmt.Sprintf("ingestion OIDC configuration error: %v", err))
 		}
@@ -353,7 +315,7 @@ func main() {
 		utils.WriteLog("warning", "DEV mode enabled")
 		e.Use(middleware.CORS())
 	}
-	if config.DisableAuth || config.AuthMode == authModeNone {
+	if config.DisableAuth || config.AuthMode == configuration.AuthModeNone {
 		utils.WriteLog("warning", "Authentication disabled")
 		e.Use(middleware.CORS())
 	}
@@ -372,11 +334,11 @@ func main() {
 
 	// Wire up middleware and routes based on auth mode
 	switch config.AuthMode {
-	case authModeOIDC:
+	case configuration.AuthModeOIDC:
 		// OIDC mode: register auth routes and middleware
 		oidc.RegisterRoutes(apiRoute)
 
-	case authModeNone:
+	case configuration.AuthModeNone:
 		// No auth mode: skip all auth
 		apiRoute.GET("/auth/me", oidc.Me).Name = routeNameAuthMe
 		apiRoute.POST("/auth", api.Authenticate).Name = routeNameAuthenticate
@@ -410,7 +372,7 @@ func main() {
 
 	// Build ingest middleware slice (empty when ingest auth is off)
 	var ingestMW []echo.MiddlewareFunc
-	if config.IngestAuth == authModeOIDC {
+	if config.IngestAuth == configuration.AuthModeOIDC {
 		ingestMW = append(ingestMW, oidc.IngestBearerMiddleware())
 	}
 
