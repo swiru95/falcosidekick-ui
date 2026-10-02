@@ -167,7 +167,8 @@ func setupTestConfig(authMode, issuer, clientID string) {
 	config.OIDCRedirectURL = testOIDCRedirectURL
 	config.OIDCUsernameClaim = claimPreferredUsername
 	config.OIDCGroupsClaim = claimGroups
-	config.SessionTTL = 28800 // 8 hours
+	config.SessionTTL = 28800        // 8 hours
+	config.SessionIdleTimeout = 1800 // 30 minutes
 }
 
 // TestSessionMiddlewarePublicEndpoint tests that public endpoints skip session check

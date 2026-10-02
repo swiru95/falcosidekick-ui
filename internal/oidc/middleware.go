@@ -68,6 +68,8 @@ func SessionMiddleware() echo.MiddlewareFunc {
 
 			if err != nil {
 				c.Response().Header().Set("Content-Type", "application/json")
+				c.Response().Header().Set("Cache-Control", "no-store")
+				c.Response().Header().Set("Pragma", "no-cache")
 				return c.JSON(http.StatusUnauthorized, map[string]string{ErrorJSON: errorUnauthenticated})
 			}
 
@@ -75,6 +77,8 @@ func SessionMiddleware() echo.MiddlewareFunc {
 			conn, err := GetRedisConn()
 			if err != nil {
 				c.Response().Header().Set("Content-Type", "application/json")
+				c.Response().Header().Set("Cache-Control", "no-store")
+				c.Response().Header().Set("Pragma", "no-cache")
 				return c.JSON(http.StatusUnauthorized, map[string]string{ErrorJSON: errorUnauthenticated})
 			}
 			defer conn.Close()
@@ -82,27 +86,30 @@ func SessionMiddleware() echo.MiddlewareFunc {
 			session, err := GetSession(conn, sessionCookie.Value)
 			if err != nil {
 				c.Response().Header().Set("Content-Type", "application/json")
+				c.Response().Header().Set("Cache-Control", "no-store")
+				c.Response().Header().Set("Pragma", "no-cache")
 				return c.JSON(http.StatusUnauthorized, map[string]string{ErrorJSON: errorUnauthenticated})
 			}
 
 			// Check absolute TTL
 			createdAt := session.CreatedAt
 			ttl := time.Duration(config.SessionTTL) * time.Second
-			if ttl == 0 {
-				ttl = 8 * time.Hour
-			}
 
 			if time.Since(createdAt) >= ttl {
 				DeleteSession(conn, sessionCookie.Value)
 				c.Response().Header().Set("Content-Type", "application/json")
+				c.Response().Header().Set("Cache-Control", "no-store")
+				c.Response().Header().Set("Pragma", "no-cache")
 				return c.JSON(http.StatusUnauthorized, map[string]string{ErrorJSON: errorUnauthenticated})
 			}
 
-			// Refresh idle timeout (at most once per minute)
+			// Refresh idle timeout
 			if err := RefreshSessionTTL(conn, sessionCookie.Value); err != nil {
 				// Idle timeout exceeded or other session error
 				DeleteSession(conn, sessionCookie.Value)
 				c.Response().Header().Set("Content-Type", "application/json")
+				c.Response().Header().Set("Cache-Control", "no-store")
+				c.Response().Header().Set("Pragma", "no-cache")
 				return c.JSON(http.StatusUnauthorized, map[string]string{ErrorJSON: errorUnauthenticated})
 			}
 

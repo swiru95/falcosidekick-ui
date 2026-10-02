@@ -13,6 +13,8 @@ A simple WebUI for displaying latest events from [Falco](https://falco.org). It 
 
 Events are stored in a `Redis` server with [`Redisearch`](https://github.com/RediSearch/RediSearch) module (> v2).
 
+**For OIDC mode:** Redis >= 6.2 is required (for `GETDEL` command used in flow token management).
+
 ## Usage
 
 ### Authentication
@@ -24,6 +26,11 @@ Traditional HTTP Basic Auth. Set username/password via `-u` flag or `FALCOSIDEKI
 
 #### OIDC/SSO
 OpenID Connect authentication with support for any standard OIDC provider (Keycloak, Dex, Authentik, Okta, Entra ID, Google, etc.).
+
+**OIDC Implementation Notes:**
+- Session ID tokens are stored server-side in Redis for secure logout hint delivery (only the session ID is stored in cookies)
+- JWKS bearer tokens (when configured) are only sent to the IdP's JWKS endpoint for Kubernetes projected token scenarios; bearer credentials are not sent to other hosts
+- Ingestion endpoints (`/api/v1/` and `/api/v1/events/add`) remain unauthenticated by default; enable `INGEST_OIDC_*` variables to secure them with OIDC-based bearer token validation
 
 **Enable OIDC:**
 ```bash

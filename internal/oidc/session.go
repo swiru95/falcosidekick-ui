@@ -113,14 +113,7 @@ func StoreSession(conn redis.Conn, sessionID string, session *Session) error {
 
 	// Calculate TTL as minimum of idle timeout and absolute session TTL
 	absoluteTTL := config.SessionTTL
-	if absoluteTTL == 0 {
-		absoluteTTL = 28800 // 8 hours default
-	}
-
 	idleTTL := config.SessionIdleTimeout
-	if idleTTL == 0 {
-		idleTTL = 1800 // 30 minutes default
-	}
 
 	ttl := absoluteTTL
 	if idleTTL > 0 && idleTTL < absoluteTTL {
@@ -153,7 +146,8 @@ func GetSession(conn redis.Conn, sessionID string) (*Session, error) {
 	return &session, nil
 }
 
-// RefreshSessionTTL updates the idle timeout for a session (at most once per minute).
+// RefreshSessionTTL updates the idle timeout for a session.
+// Refreshes when time.Since(session.LastSeen) >= min(60s, idle/4).
 // Returns an error if the session has exceeded idle timeout.
 func RefreshSessionTTL(conn redis.Conn, sessionID string) error {
 	config := configuration.GetConfiguration()
@@ -176,35 +170,23 @@ func RefreshSessionTTL(conn redis.Conn, sessionID string) error {
 
 	// Check idle timeout
 	idleTTL := config.SessionIdleTimeout
-	if idleTTL == 0 {
-		idleTTL = 1800 // 30 minutes default
-	}
+	absoluteTTL := config.SessionTTL
 
 	if idleTTL > 0 && time.Since(session.LastSeen) > time.Duration(idleTTL)*time.Second {
 		return fmt.Errorf("session idle timeout exceeded")
 	}
 
-	// Get current TTL and only update if more than 60 seconds have passed since last refresh
-	pttl, err := redis.Int(conn.Do("PTTL", key))
-	if err != nil {
-		if err == redis.ErrNil {
-			return fmt.Errorf("session not found")
+	// Determine when to refresh: min(60s, idle/4)
+	refreshThreshold := 60 * time.Second
+	if idleTTL > 0 {
+		refreshThreshold = time.Duration(idleTTL/4) * time.Second
+		if refreshThreshold > 60*time.Second {
+			refreshThreshold = 60 * time.Second
 		}
-		return fmt.Errorf("failed to get session TTL: %w", err)
 	}
 
-	absoluteTTL := config.SessionTTL
-	if absoluteTTL == 0 {
-		absoluteTTL = 28800 // 8 hours default
-	}
-
-	// Only refresh if less than (min_ttl - 60) seconds remain
-	minTTL := absoluteTTL
-	if idleTTL > 0 && idleTTL < absoluteTTL {
-		minTTL = idleTTL
-	}
-
-	if pttl < (minTTL-60)*1000 {
+	// Only refresh if enough time has passed since LastSeen
+	if time.Since(session.LastSeen) >= refreshThreshold {
 		// Update LastSeen
 		session.LastSeen = time.Now()
 		updatedData, err := json.Marshal(session)
@@ -212,8 +194,27 @@ func RefreshSessionTTL(conn redis.Conn, sessionID string) error {
 			return fmt.Errorf("failed to marshal session: %w", err)
 		}
 
-		// Set new TTL based on remaining time and idle timeout
-		_, err = conn.Do("SET", key, string(updatedData), "EX", minTTL)
+		// Calculate new TTL: min(idle, remaining absolute = absoluteTTL - time.Since(CreatedAt)), at least 1s
+		newTTL := absoluteTTL
+		if idleTTL > 0 && idleTTL < newTTL {
+			newTTL = idleTTL
+		}
+
+		// Ensure remaining absolute TTL doesn't exceed absolute session TTL
+		elapsedFromCreation := time.Since(session.CreatedAt)
+		remainingAbsolute := time.Duration(absoluteTTL)*time.Second - elapsedFromCreation
+		if remainingAbsolute < time.Duration(newTTL)*time.Second {
+			newTTL = int(remainingAbsolute.Seconds())
+		}
+
+		// Ensure at least 1s
+		if newTTL < 1 {
+			newTTL = 1
+		}
+
+		// Use SET key val XX EX to atomically update only if key exists
+		// This prevents resurrection of a concurrently deleted session
+		_, err = conn.Do("SET", key, string(updatedData), "XX", "EX", newTTL)
 		if err != nil {
 			return fmt.Errorf("failed to refresh session: %w", err)
 		}

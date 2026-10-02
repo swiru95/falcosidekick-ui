@@ -207,6 +207,8 @@ func Callback(c echo.Context) error {
 		cookie, err = c.Cookie("fsui_oidc_flow")
 	}
 	if err != nil {
+		c.Response().Header().Set("Cache-Control", "no-store")
+		c.Response().Header().Set("Pragma", "no-cache")
 		return echo.NewHTTPError(http.StatusBadRequest, "missing flow cookie")
 	}
 
@@ -214,6 +216,8 @@ func Callback(c echo.Context) error {
 	conn, err := GetRedisConn()
 	if err != nil {
 		utils.WriteLog("error", fmt.Sprintf("failed to get redis connection: %v", err))
+		c.Response().Header().Set("Cache-Control", "no-store")
+		c.Response().Header().Set("Pragma", "no-cache")
 		return c.Redirect(http.StatusFound, getAppBase(config.OIDCRedirectURL)+"#/login?error=sso_failed")
 	}
 	defer conn.Close()
@@ -221,8 +225,17 @@ func Callback(c echo.Context) error {
 	flow, err := GetFlow(conn, cookie.Value)
 	if err != nil {
 		utils.WriteLog("error", fmt.Sprintf("failed to get flow: %v", err))
+		c.Response().Header().Set("Cache-Control", "no-store")
+		c.Response().Header().Set("Pragma", "no-cache")
 		return c.Redirect(http.StatusFound, getAppBase(config.OIDCRedirectURL)+"#/login?error=sso_failed")
 	}
+
+	// N3: Clear flow cookie immediately after reading it (on every path, success or failure)
+	flowCookieName := "__Host-fsui_oidc_flow"
+	if config.OIDCInsecureAllowHTTP {
+		flowCookieName = "fsui_oidc_flow"
+	}
+	setCookie(c, flowCookieName, "", -1, config)
 
 	// Check for error from IdP
 	// L5: Validate error parameter format before logging
@@ -232,12 +245,16 @@ func Callback(c echo.Context) error {
 		} else {
 			utils.WriteLog("error", "IdP error: invalid")
 		}
+		c.Response().Header().Set("Cache-Control", "no-store")
+		c.Response().Header().Set("Pragma", "no-cache")
 		return c.Redirect(http.StatusFound, getAppBase(config.OIDCRedirectURL)+"#/login?error=sso_failed")
 	}
 
 	// Verify RFC 9207: if iss parameter is present, it must match issuer
 	if iss := c.QueryParam("iss"); iss != "" {
 		if subtle.ConstantTimeCompare([]byte(iss), []byte(config.OIDCIssuer)) != 1 {
+			c.Response().Header().Set("Cache-Control", "no-store")
+			c.Response().Header().Set("Pragma", "no-cache")
 			return echo.NewHTTPError(http.StatusBadRequest, "issuer mismatch")
 		}
 	}
@@ -245,6 +262,8 @@ func Callback(c echo.Context) error {
 	// Verify state
 	state := c.QueryParam("state")
 	if subtle.ConstantTimeCompare([]byte(state), []byte(flow.State)) != 1 {
+		c.Response().Header().Set("Cache-Control", "no-store")
+		c.Response().Header().Set("Pragma", "no-cache")
 		return echo.NewHTTPError(http.StatusBadRequest, "state mismatch")
 	}
 
@@ -253,6 +272,8 @@ func Callback(c echo.Context) error {
 	oauth2Cfg, err := GetOAuth2Config(ctx)
 	if err != nil {
 		utils.WriteLog("error", fmt.Sprintf("failed to get OAuth2 config: %v", err))
+		c.Response().Header().Set("Cache-Control", "no-store")
+		c.Response().Header().Set("Pragma", "no-cache")
 		return c.Redirect(http.StatusFound, getAppBase(config.OIDCRedirectURL)+"#/login?error=sso_failed")
 	}
 
@@ -260,6 +281,8 @@ func Callback(c echo.Context) error {
 	httpClient, err := getHTTPClient()
 	if err != nil {
 		utils.WriteLog("error", fmt.Sprintf("failed to create HTTP client: %v", err))
+		c.Response().Header().Set("Cache-Control", "no-store")
+		c.Response().Header().Set("Pragma", "no-cache")
 		return c.Redirect(http.StatusFound, getAppBase(config.OIDCRedirectURL)+"#/login?error=sso_failed")
 	}
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
@@ -267,6 +290,8 @@ func Callback(c echo.Context) error {
 	token, err := oauth2Cfg.Exchange(ctx, code, oauth2.VerifierOption(flow.Verifier))
 	if err != nil {
 		utils.WriteLog("error", fmt.Sprintf("failed to exchange token: %v", err))
+		c.Response().Header().Set("Cache-Control", "no-store")
+		c.Response().Header().Set("Pragma", "no-cache")
 		return c.Redirect(http.StatusFound, getAppBase(config.OIDCRedirectURL)+"#/login?error=sso_failed")
 	}
 
@@ -274,12 +299,16 @@ func Callback(c echo.Context) error {
 	rawIDToken := token.Extra("id_token")
 	if rawIDToken == nil {
 		utils.WriteLog("error", "missing id_token in token response")
+		c.Response().Header().Set("Cache-Control", "no-store")
+		c.Response().Header().Set("Pragma", "no-cache")
 		return c.Redirect(http.StatusFound, getAppBase(config.OIDCRedirectURL)+"#/login?error=sso_failed")
 	}
 
 	idTokenString, ok := rawIDToken.(string)
 	if !ok {
 		utils.WriteLog("error", "id_token is not a string")
+		c.Response().Header().Set("Cache-Control", "no-store")
+		c.Response().Header().Set("Pragma", "no-cache")
 		return c.Redirect(http.StatusFound, getAppBase(config.OIDCRedirectURL)+"#/login?error=sso_failed")
 	}
 
@@ -287,12 +316,16 @@ func Callback(c echo.Context) error {
 	verifier, err := GetIDTokenVerifier(ctx)
 	if err != nil {
 		utils.WriteLog("error", fmt.Sprintf("failed to get ID token verifier: %v", err))
+		c.Response().Header().Set("Cache-Control", "no-store")
+		c.Response().Header().Set("Pragma", "no-cache")
 		return c.Redirect(http.StatusFound, getAppBase(config.OIDCRedirectURL)+"#/login?error=sso_failed")
 	}
 
 	idToken, err := verifier.Verify(ctx, idTokenString)
 	if err != nil {
 		utils.WriteLog("error", fmt.Sprintf("failed to verify ID token: %v", err))
+		c.Response().Header().Set("Cache-Control", "no-store")
+		c.Response().Header().Set("Pragma", "no-cache")
 		return c.Redirect(http.StatusFound, getAppBase(config.OIDCRedirectURL)+"#/login?error=sso_failed")
 	}
 
@@ -303,11 +336,15 @@ func Callback(c echo.Context) error {
 	}
 	if err := idToken.Claims(&claims); err != nil {
 		utils.WriteLog("error", fmt.Sprintf("failed to parse claims: %v", err))
+		c.Response().Header().Set("Cache-Control", "no-store")
+		c.Response().Header().Set("Pragma", "no-cache")
 		return c.Redirect(http.StatusFound, getAppBase(config.OIDCRedirectURL)+"#/login?error=sso_failed")
 	}
 
 	if subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(flow.Nonce)) != 1 {
 		utils.WriteLog("error", "nonce mismatch")
+		c.Response().Header().Set("Cache-Control", "no-store")
+		c.Response().Header().Set("Pragma", "no-cache")
 		return c.Redirect(http.StatusFound, getAppBase(config.OIDCRedirectURL)+"#/login?error=sso_failed")
 	}
 
@@ -318,6 +355,8 @@ func Callback(c echo.Context) error {
 		if ok && len(aud) > 1 && claims.AZP != "" {
 			if subtle.ConstantTimeCompare([]byte(claims.AZP), []byte(config.OIDCClientID)) != 1 {
 				utils.WriteLog("error", "azp mismatch")
+				c.Response().Header().Set("Cache-Control", "no-store")
+				c.Response().Header().Set("Pragma", "no-cache")
 				return c.Redirect(http.StatusFound, getAppBase(config.OIDCRedirectURL)+"#/login?error=sso_failed")
 			}
 		}
@@ -330,6 +369,8 @@ func Callback(c echo.Context) error {
 	if config.OIDCAllowedGroups != "" {
 		if !isUserInAllowedGroups(groups, config.OIDCAllowedGroups) {
 			utils.WriteLog("warning", fmt.Sprintf("user %v not in allowed groups", username))
+			c.Response().Header().Set("Cache-Control", "no-store")
+			c.Response().Header().Set("Pragma", "no-cache")
 			return c.Redirect(http.StatusFound, getAppBase(config.OIDCRedirectURL)+"#/login?error=forbidden")
 		}
 	}
@@ -349,6 +390,8 @@ func Callback(c echo.Context) error {
 	sessionID, err := GenerateID()
 	if err != nil {
 		utils.WriteLog("error", fmt.Sprintf("failed to generate session ID: %v", err))
+		c.Response().Header().Set("Cache-Control", "no-store")
+		c.Response().Header().Set("Pragma", "no-cache")
 		return c.Redirect(http.StatusFound, getAppBase(config.OIDCRedirectURL)+"#/login?error=sso_failed")
 	}
 
@@ -364,6 +407,8 @@ func Callback(c echo.Context) error {
 
 	if err := StoreSession(conn, sessionID, session); err != nil {
 		utils.WriteLog("error", fmt.Sprintf("failed to store session: %v", err))
+		c.Response().Header().Set("Cache-Control", "no-store")
+		c.Response().Header().Set("Pragma", "no-cache")
 		return c.Redirect(http.StatusFound, getAppBase(config.OIDCRedirectURL)+"#/login?error=sso_failed")
 	}
 
@@ -373,13 +418,6 @@ func Callback(c echo.Context) error {
 		sessionCookieName = "fsui_session"
 	}
 	setCookie(c, sessionCookieName, sessionID, 0, config)
-
-	// Clear flow cookie
-	flowCookieName := "__Host-fsui_oidc_flow"
-	if config.OIDCInsecureAllowHTTP {
-		flowCookieName = "fsui_oidc_flow"
-	}
-	setCookie(c, flowCookieName, "", -1, config)
 
 	// Redirect to app base
 	c.Response().Header().Set("Cache-Control", "no-store")
@@ -444,17 +482,8 @@ func Logout(c echo.Context) error {
 		cookieName = "fsui_session"
 	}
 
-	// Expire session cookie
-	expireCookie := &http.Cookie{
-		Name:     cookieName,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		Secure:   true,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	}
-	c.SetCookie(expireCookie)
+	// N2: Use setCookie helper to respect INSECURE_ALLOW_HTTP
+	setCookie(c, cookieName, "", -1, config)
 
 	// Get end_session_endpoint from provider
 	logoutURL := ""
@@ -516,9 +545,6 @@ func Me(c echo.Context) error {
 					// Check absolute TTL
 					createdAt := session.CreatedAt
 					ttl := time.Duration(config.SessionTTL) * time.Second
-					if ttl == 0 {
-						ttl = 8 * time.Hour
-					}
 
 					if time.Since(createdAt) < ttl {
 						response["authenticated"] = true

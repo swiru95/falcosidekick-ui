@@ -45,8 +45,6 @@ type Configuration struct {
 	// Ingestion auth fields
 	IngestAuth                  string `json:"-"`
 	IngestOIDCIssuer            string `json:"-"`
-	IngestOIDCClientSecret      string `json:"-"`
-	IngestOIDCClientSecretFile  string `json:"-"`
 	IngestOIDCAudience          string `json:"-"`
 	IngestOIDCAllowedSubjects   string `json:"-"`
 	IngestOIDCAllowedClients    string `json:"-"`

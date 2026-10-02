@@ -45,6 +45,12 @@ func ValidateConfig() error {
 		if !config.OIDCInsecureAllowHTTP && !strings.HasPrefix(config.OIDCRedirectURL, "https://") {
 			return fmt.Errorf("OIDC redirect URL must be https:// unless OIDC_INSECURE_ALLOW_HTTP=true")
 		}
+		if config.SessionTTL == 0 {
+			return fmt.Errorf("SESSION_TTL is required and must be non-zero in oidc mode")
+		}
+		if config.SessionIdleTimeout == 0 {
+			return fmt.Errorf("SESSION_IDLE_TIMEOUT is required and must be non-zero in oidc mode")
+		}
 		if config.OIDCInsecureAllowHTTP {
 			utils.WriteLog("warning", "OIDC insecure mode enabled - for development only")
 		}
@@ -62,7 +68,7 @@ func ValidateIngestConfig() error {
 			return fmt.Errorf("ingestion OIDC issuer is required in oidc ingest mode")
 		}
 		if !config.IngestOIDCInsecureAllowHTTP && !strings.HasPrefix(config.IngestOIDCIssuer, "https://") {
-			return fmt.Errorf("ingestion OIDC issuer must be https:// unless OIDC_INSECURE_ALLOW_HTTP=true")
+			return fmt.Errorf("ingestion OIDC issuer must be https:// unless FALCOSIDEKICK_UI_INGEST_OIDC_INSECURE_ALLOW_HTTP=true")
 		}
 		if config.IngestOIDCAudience == "" {
 			return fmt.Errorf("ingestion OIDC audience is required in oidc ingest mode")

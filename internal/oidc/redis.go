@@ -41,10 +41,6 @@ func GetRedisConn() (redis.Conn, error) {
 
 // getConnPool returns or creates the Redis connection pool.
 func getConnPool() (*redis.Pool, error) {
-	if connPool != nil {
-		return connPool, nil
-	}
-
 	connPoolMutex.Lock()
 	defer connPoolMutex.Unlock()
 
@@ -83,6 +79,7 @@ func getConnPool() (*redis.Pool, error) {
 	connPool = &redis.Pool{
 		MaxIdle:     16,
 		MaxActive:   32,
+		Wait:        true,
 		IdleTimeout: 300 * time.Second,
 		Dial: func() (redis.Conn, error) {
 			c, err := redis.Dial("tcp", serverAddress, dialOpts...)

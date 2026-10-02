@@ -33,22 +33,72 @@ import (
 )
 
 // bearerTokenRoundTripper wraps an http.RoundTripper and adds Authorization header
-// only for requests to the issuer host.
+// only for requests to the issuer host. It re-reads the token file on each request
+// to support token rotation (e.g., Kubernetes projected tokens).
 type bearerTokenRoundTripper struct {
 	rt                http.RoundTripper
 	issuerHost        string
-	bearerToken       string
+	tokenFilePath     string
+	lastModTime       time.Time
+	cachedToken       string
+	mu                sync.Mutex
 	insecureAllowHTTP bool
 }
 
 func (b *bearerTokenRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Clone the request before modifying headers
+	req = req.Clone(req.Context())
+
 	// Add Authorization header if request is to issuer host
 	// Only allow HTTPS by default, or HTTP if InsecureAllowHTTP is set
 	isSecure := req.URL.Scheme == "https" || (b.insecureAllowHTTP && req.URL.Scheme == "http")
 	if req.URL.Host == b.issuerHost && isSecure {
-		req.Header.Set("Authorization", "Bearer "+b.bearerToken)
+		token := b.getToken()
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
 	}
 	return b.rt.RoundTrip(req)
+}
+
+// getToken re-reads the bearer token file at most every 30s to support rotation
+func (b *bearerTokenRoundTripper) getToken() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// Stat file at most every 30s
+	now := time.Now()
+	if now.Sub(b.lastModTime) < 30*time.Second && b.cachedToken != "" {
+		return b.cachedToken
+	}
+
+	// Try to read and stat the file
+	stat, err := os.Stat(b.tokenFilePath)
+	if err != nil {
+		// If we can't stat, keep using cached token
+		return b.cachedToken
+	}
+
+	// If file hasn't been modified and we have a cached token, use it
+	if stat.ModTime() == b.lastModTime && b.cachedToken != "" {
+		return b.cachedToken
+	}
+
+	// Read the file
+	data, err := os.ReadFile(b.tokenFilePath)
+	if err != nil {
+		// If we can't read, keep using cached token
+		return b.cachedToken
+	}
+
+	// Trim whitespace and update cache
+	token := strings.TrimSpace(string(data))
+	b.lastModTime = stat.ModTime()
+	if token != "" {
+		b.cachedToken = token
+	}
+
+	return b.cachedToken
 }
 
 var (
@@ -85,11 +135,12 @@ func getHTTPClient() (*http.Client, error) {
 	}
 
 	tlsConfig.RootCAs = rootCAs
+	// Clone default transport and customize
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = tlsConfig
 	return &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: tlsConfig,
-		},
+		Timeout:   10 * time.Second,
+		Transport: transport,
 	}, nil
 }
 
@@ -117,19 +168,14 @@ func getIngestHTTPClient() (*http.Client, error) {
 		}
 	}
 
-	// Create transport
-	transport := &http.Transport{
-		TLSClientConfig: tlsConfig,
-	}
+	tlsConfig.RootCAs = rootCAs
+	// Clone default transport and customize
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = tlsConfig
 
 	// If JWKS bearer file is provided, wrap the transport with a bearer token RoundTripper
 	var rt http.RoundTripper = transport
 	if config.IngestOIDCJWKSBearerFile != "" {
-		bearerToken, err := os.ReadFile(config.IngestOIDCJWKSBearerFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read JWKS bearer token file: %w", err)
-		}
-
 		// Extract issuer host from URL
 		issuerURL, err := url.Parse(config.IngestOIDCIssuer)
 		if err != nil {
@@ -139,12 +185,11 @@ func getIngestHTTPClient() (*http.Client, error) {
 		rt = &bearerTokenRoundTripper{
 			rt:                transport,
 			issuerHost:        issuerURL.Host,
-			bearerToken:       strings.TrimSpace(string(bearerToken)),
+			tokenFilePath:     config.IngestOIDCJWKSBearerFile,
 			insecureAllowHTTP: config.IngestOIDCInsecureAllowHTTP,
 		}
 	}
 
-	tlsConfig.RootCAs = rootCAs
 	return &http.Client{
 		Timeout:   10 * time.Second,
 		Transport: rt,
@@ -154,10 +199,6 @@ func getIngestHTTPClient() (*http.Client, error) {
 // GetProvider returns the cached OIDC provider or initializes it.
 // It's lazy and thread-safe.
 func GetProvider(ctx context.Context) (*oidc.Provider, error) {
-	if cachedProvider != nil {
-		return cachedProvider, nil
-	}
-
 	providerMutex.Lock()
 	defer providerMutex.Unlock()
 
@@ -188,7 +229,7 @@ func GetProvider(ctx context.Context) (*oidc.Provider, error) {
 func GetOAuth2Config(ctx context.Context) (*oauth2.Config, error) {
 	providerMutex.Lock()
 	if oauth2Config != nil {
-		providerMutex.Unlock()
+		defer providerMutex.Unlock()
 		return oauth2Config, nil
 	}
 	providerMutex.Unlock()
@@ -237,7 +278,7 @@ func GetOAuth2Config(ctx context.Context) (*oauth2.Config, error) {
 func GetIDTokenVerifier(ctx context.Context) (*oidc.IDTokenVerifier, error) {
 	providerMutex.Lock()
 	if idTokenVerifier != nil {
-		providerMutex.Unlock()
+		defer providerMutex.Unlock()
 		return idTokenVerifier, nil
 	}
 	providerMutex.Unlock()
