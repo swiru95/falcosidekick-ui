@@ -26,6 +26,8 @@ import (
 	"testing"
 	"time"
 
+	gooidc "github.com/coreos/go-oidc/v3/oidc"
+
 	"github.com/falcosecurity/falcosidekick-ui/configuration"
 )
 
@@ -49,7 +51,7 @@ func TestIngestJWKSBearerSplitHost(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"keys": []map[string]interface{}{{
-				"kty": "RSA", "kid": ti.keyID, "use": "sig", "alg": "RS256",
+				"kty": "RSA", "kid": ti.keyID, "use": "sig", "alg": gooidc.RS256,
 				"n": base64URLEncode(pub.N.Bytes()),
 				"e": base64URLEncode([]byte{0x01, 0x00, 0x01}),
 			}},
