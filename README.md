@@ -29,7 +29,7 @@ OpenID Connect authentication with support for any standard OIDC provider (Keycl
 
 **OIDC Implementation Notes:**
 - Session ID tokens are stored server-side in Redis for secure logout hint delivery (only the session ID is stored in cookies)
-- JWKS bearer tokens (when configured) are only sent to the IdP's JWKS endpoint for Kubernetes projected token scenarios; bearer credentials are not sent to other hosts
+- JWKS bearer tokens (when configured) are only sent over HTTPS (or HTTP with insecure-allow-http) to the issuer host and the host of the `jwks_uri` advertised by discovery (these differ on Kubernetes, e.g. issuer `kubernetes.default.svc.cluster.local` vs. API server address); bearer credentials are never sent to any other host
 - Ingestion endpoints (`/api/v1/` and `/api/v1/events/add`) remain unauthenticated by default; enable `INGEST_OIDC_*` variables to secure them with OIDC-based bearer token validation
 
 **Enable OIDC:**
@@ -62,6 +62,22 @@ OpenID Connect authentication with support for any standard OIDC provider (Keycl
   -oidc-username-claim preferred_username \
   -oidc-groups-claim groups \
   -oidc-allowed-groups admins,operators
+```
+
+**Public client (no secret):**
+
+If neither `-oidc-client-secret` nor `-oidc-client-secret-file` is set, the UI runs as an OIDC public client: the authorization code flow uses PKCE (S256) and the token request sends `client_id` and `code_verifier` in the form body, with no `Authorization` header and no `client_secret`. A line is logged at startup when this mode is active. With a secret set, behaviour is unchanged (confidential client).
+
+Entra ID steps:
+1. App registration > Authentication > Add a platform > **Mobile and desktop applications**, and register the redirect URI (e.g. `https://ui.example.com/api/v1/auth/oidc/callback`).
+2. Do not create a client secret.
+3. If login fails with `AADSTS7000218` (request body must contain `client_assertion` or `client_secret`), set **Allow public client flows** to **Yes** under Authentication > Advanced settings.
+
+```bash
+./falcosidekick-ui -auth-mode oidc \
+  -oidc-issuer https://login.microsoftonline.com/<tenant-id>/v2.0 \
+  -oidc-client-id <application-client-id> \
+  -oidc-redirect-url https://ui.example.com/api/v1/auth/oidc/callback
 ```
 
 **Kubernetes with Keycloak:**

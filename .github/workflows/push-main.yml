@@ -10,6 +10,7 @@ permissions: {}
 
 jobs:
   build-push-image:
+    if: github.repository == 'falcosecurity/falcosidekick-ui'
 
     permissions:
       contents: read

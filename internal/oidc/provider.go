@@ -33,11 +33,15 @@ import (
 )
 
 // bearerTokenRoundTripper wraps an http.RoundTripper and adds Authorization header
-// only for requests to the issuer host. It re-reads the token file on each request
+// only for requests to the issuer host and to the host of the jwks_uri advertised by
+// discovery (they differ e.g. on Kubernetes, where the issuer is
+// https://kubernetes.default.svc.cluster.local but jwks_uri points at the API server
+// address). It never sends the token to any other host. It re-reads the token file on each request
 // to support token rotation (e.g., Kubernetes projected tokens).
 type bearerTokenRoundTripper struct {
 	rt                http.RoundTripper
 	issuerHost        string
+	jwksHost          string // set after discovery via setJWKSHost; guarded by mu
 	tokenFilePath     string
 	lastModTime       time.Time
 	lastCheck         time.Time
@@ -54,13 +58,27 @@ func (b *bearerTokenRoundTripper) RoundTrip(req *http.Request) (*http.Response, 
 	// Only allow HTTPS by default, or HTTP if InsecureAllowHTTP is set
 	//nolint:goconst
 	isSecure := req.URL.Scheme == "https" || (b.insecureAllowHTTP && req.URL.Scheme == "http")
-	if req.URL.Host == b.issuerHost && isSecure {
+	if isSecure && b.isTrustedHost(req.URL.Host) {
 		token := b.getToken()
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
 	}
 	return b.rt.RoundTrip(req)
+}
+
+// isTrustedHost reports whether the bearer token may be sent to host.
+func (b *bearerTokenRoundTripper) isTrustedHost(host string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return host == b.issuerHost || (b.jwksHost != "" && host == b.jwksHost)
+}
+
+// setJWKSHost records the host of the discovered jwks_uri as a second trusted host.
+func (b *bearerTokenRoundTripper) setJWKSHost(host string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.jwksHost = host
 }
 
 // getToken re-reads the bearer token file at most every 30s to support rotation
@@ -231,6 +249,23 @@ func GetProvider(ctx context.Context) (*oidc.Provider, error) {
 	return provider, nil
 }
 
+// newOAuth2Config builds the oauth2 config. Without a client secret the client is a
+// public client (PKCE only): credentials go in the form body (client_id + code_verifier)
+// and no Authorization header is sent. Auto-detect would first try HTTP Basic with an
+// empty password, which providers such as Entra ID reject for public clients.
+func newOAuth2Config(clientID, clientSecret, redirectURL string, endpoint oauth2.Endpoint, scopes []string) *oauth2.Config {
+	if clientSecret == "" {
+		endpoint.AuthStyle = oauth2.AuthStyleInParams
+	}
+	return &oauth2.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		RedirectURL:  redirectURL,
+		Endpoint:     endpoint,
+		Scopes:       scopes,
+	}
+}
+
 // GetOAuth2Config returns the oauth2 configuration.
 func GetOAuth2Config(ctx context.Context) (*oauth2.Config, error) {
 	providerMutex.Lock()
@@ -262,13 +297,7 @@ func GetOAuth2Config(ctx context.Context) (*oauth2.Config, error) {
 		scopes = append(scopes, "profile", "email")
 	}
 
-	cfg := &oauth2.Config{
-		ClientID:     config.OIDCClientID,
-		ClientSecret: config.OIDCClientSecret,
-		RedirectURL:  config.OIDCRedirectURL,
-		Endpoint:     provider.Endpoint(),
-		Scopes:       scopes,
-	}
+	cfg := newOAuth2Config(config.OIDCClientID, config.OIDCClientSecret, config.OIDCRedirectURL, provider.Endpoint(), scopes)
 
 	// Store in global while holding lock to prevent double initialization
 	providerMutex.Lock()
@@ -338,6 +367,19 @@ func getIngestProvider(ctx context.Context) (*oidc.Provider, error) {
 	provider, err := oidc.NewProvider(ctx, config.IngestOIDCIssuer)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize ingestion OIDC provider: %w", err)
+	}
+
+	// The JWKS may live on a different host than the issuer; trust that host too
+	// (still subject to the HTTPS-only rule) so the bearer token is attached there.
+	if brt, ok := httpClient.Transport.(*bearerTokenRoundTripper); ok {
+		var disc struct {
+			JWKSURI string `json:"jwks_uri"`
+		}
+		if err := provider.Claims(&disc); err == nil && disc.JWKSURI != "" {
+			if u, err := url.Parse(disc.JWKSURI); err == nil && u.Host != "" {
+				brt.setJWKSHost(u.Host)
+			}
+		}
 	}
 
 	cachedIngestProvider = provider
