@@ -1,0 +1,14 @@
+package main
+
+import (
+	"log"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+)
+
+func main() {
+	u, _ := url.Parse("http://127.0.0.1:2802")
+	rp := httputil.NewSingleHostReverseProxy(u)
+	log.Fatal(http.ListenAndServeTLS("127.0.0.1:2803", "/tmp/e2e/pki/ui.test.pem", "/tmp/e2e/pki/ui.test.key", rp))
+}

@@ -12,19 +12,22 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package redis
+package oidc
 
 import (
 	"fmt"
 	"net"
+	"sync"
+	"time"
 
 	"github.com/falcosecurity/falcosidekick-ui/configuration"
-
-	"github.com/Issif/redisearch-go/redisearch"
 	"github.com/gomodule/redigo/redis"
 )
 
-var client *redisearch.Client
+var (
+	connPoolMutex sync.Mutex
+	connPool      *redis.Pool
+)
 
 // resolveRedisAddr normalizes a Redis address string to host:port format.
 // Examples:
@@ -45,8 +48,25 @@ func resolveRedisAddr(s string) string {
 	return net.JoinHostPort(host, port)
 }
 
-// CreateClient creates a new redisearch.Client in the redis package scope.
-func CreateClient() *redisearch.Client {
+// GetRedisConn returns a redis connection from the pool.
+// Uses the same Redis server as configured in the application.
+func GetRedisConn() (redis.Conn, error) {
+	pool, err := getConnPool()
+	if err != nil {
+		return nil, err
+	}
+	return pool.Get(), nil
+}
+
+// getConnPool returns or creates the Redis connection pool.
+func getConnPool() (*redis.Pool, error) {
+	connPoolMutex.Lock()
+	defer connPoolMutex.Unlock()
+
+	if connPool != nil {
+		return connPool, nil
+	}
+
 	config := configuration.GetConfiguration()
 	var dialOpts []redis.DialOption
 
@@ -58,26 +78,29 @@ func CreateClient() *redisearch.Client {
 		dialOpts = append(dialOpts, redis.DialPassword(config.RedisPassword))
 	}
 
+	// Add timeout options
+	dialOpts = append(dialOpts,
+		redis.DialConnectTimeout(5*time.Second),
+		redis.DialReadTimeout(5*time.Second),
+		redis.DialWriteTimeout(5*time.Second),
+	)
+
 	// Resolve the Redis address using the helper
 	serverAddress := resolveRedisAddr(config.RedisServer)
 
-	pool := &redis.Pool{Dial: func() (redis.Conn, error) {
-		c, err := redis.Dial("tcp", serverAddress, dialOpts...)
-		if err != nil {
-			return nil, err
-		}
-		return c, nil
-	}}
-
-	client = redisearch.NewClientFromPool(pool, "search-client-1")
-	return client
-}
-
-// GetClient returns an existing redisearch.Client or an error if the client
-// hasn't yet been created.
-func GetClient() (*redisearch.Client, error) {
-	if client == nil {
-		return nil, fmt.Errorf("could not retrieve redisearch.Client")
+	connPool = &redis.Pool{
+		MaxIdle:     16,
+		MaxActive:   32,
+		Wait:        true,
+		IdleTimeout: 300 * time.Second,
+		Dial: func() (redis.Conn, error) {
+			c, err := redis.Dial("tcp", serverAddress, dialOpts...)
+			if err != nil {
+				return nil, fmt.Errorf("failed to dial redis: %w", err)
+			}
+			return c, nil
+		},
 	}
-	return client, nil
+
+	return connPool, nil
 }
