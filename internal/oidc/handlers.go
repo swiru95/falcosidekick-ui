@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/falcosecurity/falcosidekick-ui/configuration"
 	"github.com/falcosecurity/falcosidekick-ui/internal/utils"
 	echo "github.com/labstack/echo/v4"
@@ -61,7 +62,9 @@ func RegisterRoutes(g *echo.Group) {
 
 // Response header constants
 const (
-	ErrorJSON = "error"
+	ErrorJSON               = "error"
+	headerXRequestedWith    = "X-Requested-With"
+	headerXRequestedWithVal = "XMLHttpRequest"
 )
 
 // OIDC claim constants
@@ -168,14 +171,8 @@ func Login(c echo.Context) error {
 	authURL := oauth2Cfg.AuthCodeURL(
 		state,
 		oauth2.S256ChallengeOption(verifier),
+		oidc.Nonce(nonce),
 	)
-
-	// Add nonce as a URL parameter
-	if strings.Contains(authURL, "?") {
-		authURL += fmt.Sprintf("&nonce=%s", nonce)
-	} else {
-		authURL += fmt.Sprintf("?nonce=%s", nonce)
-	}
 
 	// Set flow cookie (use flowID, not state)
 	flowCookieName := "__Host-fsui_oidc_flow"
@@ -448,7 +445,7 @@ func Logout(c echo.Context) error {
 	config := configuration.GetConfiguration()
 
 	// CSRF defense
-	if c.Request().Header.Get("X-Requested-With") != "XMLHttpRequest" {
+	if c.Request().Header.Get(headerXRequestedWith) != headerXRequestedWithVal {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request")
 	}
 

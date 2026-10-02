@@ -56,6 +56,37 @@ const (
 	routeNameAuthenticate = "authenticate"
 )
 
+// resolveAuthMode resolves the final auth mode based on raw input and disableAuth flag.
+// Logic:
+// - raw = strings.ToLower(strings.TrimSpace(raw))
+// - disableAuth && raw == "" → "none"
+// - disableAuth && raw == "none" → "none"
+// - disableAuth && raw is anything else → error (conflict)
+// - !disableAuth && raw == "" → "basic"
+// - raw in {basic, oidc, none} → raw; otherwise → error "invalid auth mode"
+func resolveAuthMode(raw string, disableAuth bool) (string, error) {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+
+	if disableAuth {
+		if raw == "" || raw == authModeNone {
+			return authModeNone, nil
+		}
+		return "", fmt.Errorf("DISABLEAUTH=true conflicts with AUTH_MODE set to something other than 'none'")
+	}
+
+	// disableAuth is false
+	if raw == "" {
+		return authModeBasic, nil
+	}
+
+	// Validate that raw is one of the valid modes
+	if raw == authModeBasic || raw == authModeOIDC || raw == authModeNone {
+		return raw, nil
+	}
+
+	return "", fmt.Errorf("invalid auth mode: %s", raw)
+}
+
 func init() {
 	addr := utils.GetStringFlagOrEnvParam("a", "FALCOSIDEKICK_UI_ADDR", "0.0.0.0", "Listen Address")
 	redisserver := utils.GetStringFlagOrEnvParam("r", "FALCOSIDEKICK_UI_REDIS_URL", "localhost:6379", "Redis server address")
@@ -69,7 +100,7 @@ func init() {
 	user := utils.GetStringFlagOrEnvParam("u", "FALCOSIDEKICK_UI_USER", "admin:admin", "User in format <login>:<password>")
 	disableauth := utils.GetBoolFlagOrEnvParam("d", "FALCOSIDEKICK_UI_DISABLEAUTH", false, "Disable authentication")
 	// OIDC flags
-	authMode := utils.GetStringFlagOrEnvParam("auth-mode", "FALCOSIDEKICK_UI_AUTH_MODE", "basic", "Auth mode: basic|oidc|none")
+	authMode := utils.GetStringFlagOrEnvParam("auth-mode", "FALCOSIDEKICK_UI_AUTH_MODE", "", "Auth mode: \"basic\"|\"oidc\"|\"none\" (default \"basic\")")
 	oidcIssuer := utils.GetStringFlagOrEnvParam("oidc-issuer", "FALCOSIDEKICK_UI_OIDC_ISSUER", "", "OIDC issuer URL")
 	oidcClientID := utils.GetStringFlagOrEnvParam("oidc-client-id", "FALCOSIDEKICK_UI_OIDC_CLIENT_ID", "", "OIDC client ID")
 	oidcClientSecret := utils.GetStringFlagOrEnvParam("oidc-client-secret", "FALCOSIDEKICK_UI_OIDC_CLIENT_SECRET", "", "OIDC client secret")
@@ -189,21 +220,12 @@ func init() {
 		utils.WriteLog("fatal", "Failed to parse Listen Address")
 	}
 
-	// Normalize AUTH_MODE
-	*authMode = strings.ToLower(strings.TrimSpace(*authMode))
-
-	// Validate auth mode
-	if *authMode != authModeBasic && *authMode != authModeOIDC && *authMode != authModeNone {
-		utils.WriteLog("fatal", fmt.Sprintf("invalid auth mode: %s", *authMode))
+	// Resolve and validate auth mode
+	resolvedAuthMode, err := resolveAuthMode(*authMode, *disableauth)
+	if err != nil {
+		utils.WriteLog("fatal", err.Error())
 	}
-
-	// Handle -d (disable auth): if AUTH_MODE is explicitly set to something other than none, fatal
-	if *disableauth {
-		if *authMode != authModeNone {
-			utils.WriteLog("fatal", "DISABLEAUTH=true conflicts with AUTH_MODE set to something other than 'none'")
-		}
-		*authMode = "none"
-	}
+	*authMode = resolvedAuthMode
 
 	// Validate basic auth credentials
 	if len(strings.Split(*user, ":")) != 2 {

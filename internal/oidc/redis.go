@@ -29,6 +29,25 @@ var (
 	connPool      *redis.Pool
 )
 
+// resolveRedisAddr normalizes a Redis address string to host:port format.
+// Examples:
+// - "redis-master" → "redis-master:6379"
+// - ":6380" → "localhost:6380"
+// - "h:1" → "h:1"
+// - "" → "localhost:6379"
+func resolveRedisAddr(s string) string {
+	host, port, err := net.SplitHostPort(s)
+	if err != nil {
+		// If SplitHostPort fails, the input has no port; use the input as host
+		host = s
+		port = "6379"
+	}
+	if host == "" {
+		host = "localhost"
+	}
+	return net.JoinHostPort(host, port)
+}
+
 // GetRedisConn returns a redis connection from the pool.
 // Uses the same Redis server as configured in the application.
 func GetRedisConn() (redis.Conn, error) {
@@ -66,17 +85,8 @@ func getConnPool() (*redis.Pool, error) {
 		redis.DialWriteTimeout(5*time.Second),
 	)
 
-	// Validate the host:port address
-	host, port, err := net.SplitHostPort(config.RedisServer)
-	if err != nil {
-		// If SplitHostPort fails, the input has no port; use the input as host
-		host = config.RedisServer
-		port = "6379"
-	}
-	if host == "" {
-		host = "localhost"
-	}
-	serverAddress := net.JoinHostPort(host, port)
+	// Resolve the Redis address using the helper
+	serverAddress := resolveRedisAddr(config.RedisServer)
 
 	connPool = &redis.Pool{
 		MaxIdle:     16,

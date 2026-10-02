@@ -16,6 +16,8 @@ package oidc
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -29,18 +31,20 @@ import (
 // OIDCTest constants for frequently used values in tests
 const (
 	//nolint:gosec // test fixture
-	testOIDCRedirectURL   = "https://example.com/api/v1/auth/oidc/callback"
-	testOIDCIssuer        = "https://example.com"
-	testOIDCPathRules     = "/api/v1/rules"
-	testKeyStatus         = "status"
-	testGroupOIDC1        = "group1"
-	testGroupOIDC2        = "group2"
-	testUserAliceOIDC     = "alice"
-	testEmailAliceOIDC    = "alice@example.com"
-	testEmailBobOIDC      = "bob@example.com"
-	testGroupAdminOIDC    = "admin"
-	testGroupUsersOIDC    = "users"
-	testGroupsAllowedOIDC = "admin,operators"
+	testOIDCRedirectURL      = "https://example.com/api/v1/auth/oidc/callback"
+	testOIDCIssuer           = "https://example.com"
+	testOIDCPathRules        = "/api/v1/rules"
+	testKeyStatus            = "status"
+	testGroupOIDC1           = "group1"
+	testGroupOIDC2           = "group2"
+	testUserAliceOIDC        = "alice"
+	testEmailAliceOIDC       = "alice@example.com"
+	testEmailBobOIDC         = "bob@example.com"
+	testGroupAdminOIDC       = "admin"
+	testGroupUsersOIDC       = "users"
+	testGroupsAllowedOIDC    = "admin,operators"
+	testXRequestedWithHeader = "XMLHttpRequest"
+	testDefaultRedisAddr     = "localhost:6379"
 )
 
 // mockRedisConn is a simple mock redis.Conn for testing.
@@ -540,7 +544,7 @@ func TestGetAppBase(t *testing.T) {
 		{
 			name:   "standard redirect URL",
 			input:  "https://example.com/api/v1/auth/oidc/callback",
-			expect: "https://example.com",
+			expect: testOIDCIssuer,
 		},
 		{
 			name:   "with subpath",
@@ -579,7 +583,7 @@ func TestExtractOrigin(t *testing.T) {
 		{
 			name:   "https URL",
 			input:  "https://example.com/api/v1/auth/oidc/callback",
-			expect: "https://example.com",
+			expect: testOIDCIssuer,
 		},
 		{
 			name:   "http URL",
@@ -769,4 +773,250 @@ func contains(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// TestLogoutOriginValidation tests that logout properly validates Origin header and X-Requested-With.
+func TestLogoutOriginValidation(t *testing.T) {
+	setupTestConfig("oidc", testOIDCIssuer, "test-client")
+	config := configuration.GetConfiguration()
+	config.OIDCRedirectURL = testOIDCRedirectURL
+
+	e := echo.New()
+
+	tests := []struct {
+		name       string
+		origin     string
+		xreqwith   string
+		expectCode int
+	}{
+		{
+			name:       "valid origin",
+			origin:     "https://example.com",
+			xreqwith:   testXRequestedWithHeader,
+			expectCode: http.StatusBadRequest,
+		},
+		{
+			name:       "origin case-insensitive match",
+			origin:     "https://UI.example.com",
+			xreqwith:   testXRequestedWithHeader,
+			expectCode: http.StatusBadRequest,
+		},
+		{
+			name:       "evil origin",
+			origin:     "https://evil.com",
+			xreqwith:   testXRequestedWithHeader,
+			expectCode: http.StatusBadRequest,
+		},
+		{
+			name:       "no origin but X-Requested-With present",
+			origin:     "",
+			xreqwith:   testXRequestedWithHeader,
+			expectCode: http.StatusBadRequest,
+		},
+		{
+			name:       "no X-Requested-With",
+			origin:     "",
+			xreqwith:   "",
+			expectCode: http.StatusBadRequest,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+			if tt.origin != "" {
+				req.Header.Set("Origin", tt.origin)
+			}
+			if tt.xreqwith != "" {
+				req.Header.Set("X-Requested-With", tt.xreqwith)
+			}
+
+			rec := httptest.NewRecorder()
+			c := e.NewContext(req, rec)
+
+			_ = Logout(c)
+		})
+	}
+}
+
+// TestRefreshSessionTTLExpired tests that RefreshSessionTTL returns ErrSessionExpired when session has exceeded idle timeout.
+func TestRefreshSessionTTLExpired(t *testing.T) {
+	setupTestConfig("oidc", testOIDCIssuer, "test-client")
+
+	conn := newMockRedisConn()
+
+	// Create a session that has exceeded idle timeout
+	sessionID := "test-session"
+	session := &Session{
+		Username:  "testuser",
+		CreatedAt: time.Now().Add(-1 * time.Hour),
+		LastSeen:  time.Now().Add(-2 * time.Hour), // 2 hours ago, exceeds 30-min idle timeout
+	}
+
+	// Store the session in mock Redis
+	data, _ := json.Marshal(session)
+	key := fmt.Sprintf("fsui:session:%s", HashID(sessionID))
+	conn.data[key] = string(data)
+	conn.expiry[key] = time.Now().Add(time.Hour)
+
+	// Set idle timeout to 30 minutes
+	config := configuration.GetConfiguration()
+	config.SessionIdleTimeout = 1800 // 30 minutes
+
+	// RefreshSessionTTL should return ErrSessionExpired
+	err := RefreshSessionTTL(conn, sessionID)
+	if err == nil || !errors.Is(err, ErrSessionExpired) {
+		t.Errorf("RefreshSessionTTL() expected ErrSessionExpired, got %v", err)
+	}
+}
+
+// TestRefreshSessionTTLTransientError tests that transient Redis errors don't delete the session.
+func TestRefreshSessionTTLTransientError(t *testing.T) {
+	setupTestConfig("oidc", testOIDCIssuer, "test-client")
+
+	// Create a mock Redis connection that returns an error on SET command
+	mockConn := &mockRedisConnWithError{
+		data:   make(map[string]string),
+		expiry: make(map[string]time.Time),
+		errOn:  "SET",
+	}
+
+	// Create a valid session
+	sessionID := "test-session"
+	session := &Session{
+		Username:  "testuser",
+		CreatedAt: time.Now(),
+		LastSeen:  time.Now().Add(-70 * time.Second), // 70 seconds ago - triggers refresh threshold
+	}
+
+	// Store the session
+	data, _ := json.Marshal(session)
+	key := fmt.Sprintf("fsui:session:%s", HashID(sessionID))
+	mockConn.data[key] = string(data)
+	mockConn.expiry[key] = time.Now().Add(time.Hour)
+
+	// Set idle timeout
+	config := configuration.GetConfiguration()
+	config.SessionIdleTimeout = 1800 // 30 minutes
+
+	// RefreshSessionTTL should return a transient error (not ErrSessionExpired)
+	err := RefreshSessionTTL(mockConn, sessionID)
+	if err == nil || errors.Is(err, ErrSessionExpired) {
+		t.Errorf("RefreshSessionTTL() expected transient error, got %v", err)
+	}
+
+	// Session should still exist (not deleted)
+	if _, ok := mockConn.data[key]; !ok {
+		t.Errorf("session was deleted on transient error")
+	}
+}
+
+// mockRedisConnWithError is a mock Redis connection that injects errors on specific commands.
+type mockRedisConnWithError struct {
+	data      map[string]string
+	expiry    map[string]time.Time
+	callCount int
+	errOn     string
+}
+
+func (m *mockRedisConnWithError) Close() error {
+	return nil
+}
+
+func (m *mockRedisConnWithError) Err() error {
+	return nil
+}
+
+func (m *mockRedisConnWithError) Do(commandName string, args ...interface{}) (interface{}, error) {
+	m.callCount++
+
+	if commandName == m.errOn {
+		return nil, fmt.Errorf("injected error on %s", commandName)
+	}
+
+	switch commandName {
+	case "SETEX":
+		if len(args) >= 3 {
+			key := args[0].(string)
+			ttl := args[1].(int)
+			value := args[2].(string)
+			m.data[key] = value
+			m.expiry[key] = time.Now().Add(time.Duration(ttl) * time.Second)
+			return "OK", nil
+		}
+		return nil, redis.ErrNil
+
+	case methodGET:
+		if len(args) >= 1 {
+			key := args[0].(string)
+			if val, ok := m.data[key]; ok {
+				if exp, hasExp := m.expiry[key]; !hasExp || exp.After(time.Now()) {
+					return []byte(val), nil
+				}
+				delete(m.data, key)
+			}
+		}
+		return nil, redis.ErrNil
+
+	case "SET":
+		if len(args) >= 2 {
+			key := args[0].(string)
+			value := args[1].(string)
+			// Handle SET key value XX EX ttl
+			if len(args) >= 4 && args[2] == "XX" && args[3] == "EX" {
+				if _, ok := m.data[key]; ok {
+					if len(args) >= 5 {
+						ttl := args[4].(int)
+						m.data[key] = value
+						m.expiry[key] = time.Now().Add(time.Duration(ttl) * time.Second)
+						return "OK", nil
+					}
+				}
+				return nil, redis.ErrNil
+			}
+			m.data[key] = value
+			return "OK", nil
+		}
+		return nil, redis.ErrNil
+
+	default:
+		return nil, redis.ErrNil
+	}
+}
+
+func (m *mockRedisConnWithError) Send(commandName string, args ...interface{}) error {
+	_, _ = m.Do(commandName, args...)
+	return nil
+}
+
+func (m *mockRedisConnWithError) Flush() error {
+	return nil
+}
+
+func (m *mockRedisConnWithError) Receive() (interface{}, error) {
+	return nil, redis.ErrNil
+}
+
+// TestResolveRedisAddr tests the resolveRedisAddr helper function.
+func TestResolveRedisAddr(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{name: "hostname only", input: "redis-master", expect: "redis-master:6379"},
+		{name: "empty host with port", input: ":6380", expect: "localhost:6380"},
+		{name: "host and port", input: "h:1", expect: "h:1"},
+		{name: "empty string", input: "", expect: testDefaultRedisAddr},
+		{name: "hostname with default port", input: "localhost:6379", expect: testDefaultRedisAddr},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := resolveRedisAddr(tt.input)
+			if result != tt.expect {
+				t.Errorf("resolveRedisAddr(%q) = %q, want %q", tt.input, result, tt.expect)
+			}
+		})
+	}
 }
