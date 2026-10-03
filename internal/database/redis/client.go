@@ -19,6 +19,7 @@ import (
 	"net"
 
 	"github.com/falcosecurity/falcosidekick-ui/configuration"
+	"github.com/falcosecurity/falcosidekick-ui/internal/utils"
 
 	"github.com/Issif/redisearch-go/redisearch"
 	"github.com/gomodule/redigo/redis"
@@ -46,16 +47,12 @@ func resolveRedisAddr(s string) string {
 }
 
 // CreateClient creates a new redisearch.Client in the redis package scope.
+// Any TLS/Redis-TLS configuration error is fatal at startup.
 func CreateClient() *redisearch.Client {
 	config := configuration.GetConfiguration()
-	var dialOpts []redis.DialOption
-
-	if config.RedisUsername != "" {
-		dialOpts = append(dialOpts, redis.DialUsername(config.RedisUsername))
-	}
-
-	if config.RedisPassword != "" {
-		dialOpts = append(dialOpts, redis.DialPassword(config.RedisPassword))
+	dialOpts, err := DialOptions()
+	if err != nil {
+		utils.WriteLog("fatal", err.Error())
 	}
 
 	// Resolve the Redis address using the helper

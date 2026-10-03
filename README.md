@@ -164,6 +164,7 @@ Event ingestion endpoints are accessible without authentication.
 | `FALCOSIDEKICK_UI_INGEST_OIDC_CA_FILE` | No | - | Path to custom CA certificate for OIDC discovery (PEM format) |
 | `FALCOSIDEKICK_UI_INGEST_OIDC_JWKS_BEARER_FILE` | No | - | Path to file containing bearer token for JWKS endpoint access (if protected) |
 | `FALCOSIDEKICK_UI_INGEST_OIDC_INSECURE_ALLOW_HTTP` | No | `false` | Allow HTTP (insecure) OIDC issuer URLs for development/testing only (default: HTTPS required) |
+| `FALCOSIDEKICK_UI_INGEST_MTLS_ALLOWED_SANS` | No | - | Comma-separated client certificate SANs/CNs allowed on ingestion routes (requires `FALCOSIDEKICK_UI_TLS_CLIENT_CA_FILE`; checked in addition to the bearer token) |
 
 **Session Configuration (OIDC mode):**
 
@@ -232,12 +233,30 @@ Usage of Falcosidekick-UI:
       Listen Address (default "0.0.0.0", environment "FALCOSIDEKICK_UI_ADDR")
 -d boolean
       Disable authentication (environment "FALCOSIDEKICK_UI_DISABLEAUTH")
+-ingest-mtls-allowed-sans string
+      Ingestion mTLS allowed client certificate SANs, comma-separated (default "", environment "FALCOSIDEKICK_UI_INGEST_MTLS_ALLOWED_SANS")
 -l string
       Log level: "debug", "info", "warning", "error" (default "info",  environment "FALCOSIDEKICK_UI_LOGLEVEL")
 -p int
       Listen Port (default "2802", environment "FALCOSIDEKICK_UI_PORT")
 -r string
       Redis server address (default "localhost:6379", environment "FALCOSIDEKICK_UI_REDIS_URL")
+-redis-tls boolean
+      Enable TLS to Redis (environment "FALCOSIDEKICK_UI_REDIS_TLS")
+-redis-tls-ca-file string
+      Redis TLS CA file (default "", environment "FALCOSIDEKICK_UI_REDIS_TLS_CA_FILE")
+-redis-tls-cert-file string
+      Redis TLS client certificate file (default "", environment "FALCOSIDEKICK_UI_REDIS_TLS_CERT_FILE")
+-redis-tls-key-file string
+      Redis TLS client key file (default "", environment "FALCOSIDEKICK_UI_REDIS_TLS_KEY_FILE")
+-redis-tls-server-name string
+      Redis TLS server name (default: host of the Redis address, environment "FALCOSIDEKICK_UI_REDIS_TLS_SERVER_NAME")
+-tls-cert-file string
+      TLS server certificate file, requires -tls-key-file (default "", environment "FALCOSIDEKICK_UI_TLS_CERT_FILE")
+-tls-client-ca-file string
+      TLS client CA file, enables optional client certificate verification (default "", environment "FALCOSIDEKICK_UI_TLS_CLIENT_CA_FILE")
+-tls-key-file string
+      TLS server key file, requires -tls-cert-file (default "", environment "FALCOSIDEKICK_UI_TLS_KEY_FILE")
 -t string
       TTL for keys, the format is X<unit>,
       with unit (s, m, h, d, W, M, y)" (default "0", environment "FALCOSIDEKICK_UI_TTL")
@@ -254,6 +273,13 @@ Usage of Falcosidekick-UI:
 ```
 
 > If not user is set and the authentication is not disabled, the default user is `admin:admin`
+
+### TLS
+
+- **HTTPS**: set `-tls-cert-file` and `-tls-key-file` (both or none) to serve HTTPS on the same address and port. The files are re-read when they change (hot reload, checked at most every 30s), so short-lived certificates need no restart.
+- **Client certificates**: `-tls-client-ca-file` makes the server verify client certificates *if given* (browsers, Envoy and kubelet probes without a certificate still work).
+- **Ingestion mTLS**: `-ingest-mtls-allowed-sans` (needs `-tls-client-ca-file`) additionally requires a verified client certificate on `POST /`, `POST /api/v1/` and `POST /api/v1/events/add`, whose DNS SAN, URI SAN or CN exactly matches one entry; otherwise `403`. It is combined with the ingestion bearer token when both are configured. Other routes are unaffected.
+- **Redis**: `-redis-tls` enables TLS to Redis, verified against `-redis-tls-ca-file` and `-redis-tls-server-name` (default: host of `-r`). `-redis-tls-cert-file`/`-redis-tls-key-file` add an optional, hot-reloaded client certificate.
 
 ### Run with docker
 

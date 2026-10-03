@@ -24,15 +24,14 @@ import (
 
 	"github.com/falcosecurity/falcosidekick-ui/configuration"
 	"github.com/falcosecurity/falcosidekick-ui/internal/api"
-	"github.com/falcosecurity/falcosidekick-ui/internal/auth"
 	"github.com/falcosecurity/falcosidekick-ui/internal/database/redis"
 	"github.com/falcosecurity/falcosidekick-ui/internal/models"
 	"github.com/falcosecurity/falcosidekick-ui/internal/oidc"
+	"github.com/falcosecurity/falcosidekick-ui/internal/server"
 	"github.com/falcosecurity/falcosidekick-ui/internal/utils"
 	validator "github.com/go-playground/validator/v10"
 	echo "github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
-	echoSwagger "github.com/swaggo/echo-swagger"
 
 	_ "github.com/falcosecurity/falcosidekick-ui/docs"
 )
@@ -40,14 +39,6 @@ import (
 type CustomValidator struct {
 	validator *validator.Validate
 }
-
-const AddEvent = "add-event"
-
-// Route name constants
-const (
-	routeNameAuthMe       = "auth-me"
-	routeNameAuthenticate = "authenticate"
-)
 
 func init() {
 	addr := utils.GetStringFlagOrEnvParam("a", "FALCOSIDEKICK_UI_ADDR", "0.0.0.0", "Listen Address")
@@ -89,6 +80,19 @@ func init() {
 	ingestOIDCJWKSBearerFile := utils.GetStringFlagOrEnvParam("ingest-oidc-jwks-bearer-file", "FALCOSIDEKICK_UI_INGEST_OIDC_JWKS_BEARER_FILE", "", "Ingestion OIDC JWKS bearer token file")
 	ingestOIDCInsecureAllowHTTP := utils.GetBoolFlagOrEnvParam("ingest-oidc-insecure-allow-http", "FALCOSIDEKICK_UI_INGEST_OIDC_INSECURE_ALLOW_HTTP", false, "Allow HTTP for ingestion OIDC (dev only)")
 
+	// TLS server flags
+	tlsCertFile := utils.GetStringFlagOrEnvParam("tls-cert-file", "FALCOSIDEKICK_UI_TLS_CERT_FILE", "", "TLS certificate file path")
+	tlsKeyFile := utils.GetStringFlagOrEnvParam("tls-key-file", "FALCOSIDEKICK_UI_TLS_KEY_FILE", "", "TLS key file path")
+	tlsClientCAFile := utils.GetStringFlagOrEnvParam("tls-client-ca-file", "FALCOSIDEKICK_UI_TLS_CLIENT_CA_FILE", "", "TLS client CA file path")
+	// Ingestion mTLS flags
+	ingestMTLSAllowedSANs := utils.GetStringFlagOrEnvParam("ingest-mtls-allowed-sans", "FALCOSIDEKICK_UI_INGEST_MTLS_ALLOWED_SANS", "", "Ingestion mTLS allowed SANs (comma-separated)")
+	// Redis TLS flags
+	redisTLS := utils.GetBoolFlagOrEnvParam("redis-tls", "FALCOSIDEKICK_UI_REDIS_TLS", false, "Enable Redis TLS")
+	redisTLSCAFile := utils.GetStringFlagOrEnvParam("redis-tls-ca-file", "FALCOSIDEKICK_UI_REDIS_TLS_CA_FILE", "", "Redis TLS CA file path")
+	redisTLSCertFile := utils.GetStringFlagOrEnvParam("redis-tls-cert-file", "FALCOSIDEKICK_UI_REDIS_TLS_CERT_FILE", "", "Redis TLS certificate file path")
+	redisTLSKeyFile := utils.GetStringFlagOrEnvParam("redis-tls-key-file", "FALCOSIDEKICK_UI_REDIS_TLS_KEY_FILE", "", "Redis TLS key file path")
+	redisTLSServerName := utils.GetStringFlagOrEnvParam("redis-tls-server-name", "FALCOSIDEKICK_UI_REDIS_TLS_SERVER_NAME", "", "Redis TLS server name")
+
 	flag.Usage = func() {
 		help := `Usage of Falcosidekick-UI:
 	-a string
@@ -115,6 +119,8 @@ func init() {
 	      Ingestion OIDC JWKS bearer token file (default "", environment "FALCOSIDEKICK_UI_INGEST_OIDC_JWKS_BEARER_FILE")
 	-ingest-oidc-required-scope string
 	      Ingestion OIDC required scope (default "", environment "FALCOSIDEKICK_UI_INGEST_OIDC_REQUIRED_SCOPE")
+	-ingest-mtls-allowed-sans string
+	      Ingestion mTLS allowed client certificate SANs comma-separated (default "", environment "FALCOSIDEKICK_UI_INGEST_MTLS_ALLOWED_SANS")
 	-l string
 	      Log level: "debug", "info", "warning", "error" (default "info",  environment "FALCOSIDEKICK_UI_LOGLEVEL")
 	-oidc-allowed-groups string
@@ -145,6 +151,16 @@ func init() {
 	      Listen Port (default "2802", environment "FALCOSIDEKICK_UI_PORT")
 	-r string
 	      Redis server address (default "localhost:6379", environment "FALCOSIDEKICK_UI_REDIS_URL")
+	-redis-tls boolean
+	      Enable Redis TLS (environment "FALCOSIDEKICK_UI_REDIS_TLS")
+	-redis-tls-ca-file string
+	      Redis TLS CA file path (default "", environment "FALCOSIDEKICK_UI_REDIS_TLS_CA_FILE")
+	-redis-tls-cert-file string
+	      Redis TLS client certificate file path (default "", environment "FALCOSIDEKICK_UI_REDIS_TLS_CERT_FILE")
+	-redis-tls-key-file string
+	      Redis TLS client key file path (default "", environment "FALCOSIDEKICK_UI_REDIS_TLS_KEY_FILE")
+	-redis-tls-server-name string
+	      Redis TLS server name (default: host of the Redis address, environment "FALCOSIDEKICK_UI_REDIS_TLS_SERVER_NAME")
 	-session-idle-timeout string
 	      Session idle timeout (default "1h", environment "FALCOSIDEKICK_UI_SESSION_IDLE_TIMEOUT")
 	-session-ttl string
@@ -152,6 +168,12 @@ func init() {
 	-t string
 	      TTL for keys, the format is X<unit>,
 	      with unit (s, m, h, d, W, M, y)" (default "0", environment "FALCOSIDEKICK_UI_TTL")
+	-tls-cert-file string
+	      TLS server certificate file path (default "", environment "FALCOSIDEKICK_UI_TLS_CERT_FILE")
+	-tls-client-ca-file string
+	      TLS client CA file path, enables optional client certificate verification (default "", environment "FALCOSIDEKICK_UI_TLS_CLIENT_CA_FILE")
+	-tls-key-file string
+	      TLS server key file path (default "", environment "FALCOSIDEKICK_UI_TLS_KEY_FILE")
 	-u string
 	      User in format <login>:<password> (default "admin:admin", environment "FALCOSIDEKICK_UI_USER")
 	-v boolean
@@ -255,6 +277,25 @@ func init() {
 	config.IngestOIDCJWKSBearerFile = *ingestOIDCJWKSBearerFile
 	config.IngestOIDCInsecureAllowHTTP = *ingestOIDCInsecureAllowHTTP
 
+	// Set TLS configuration
+	config.TLSCertFile = *tlsCertFile
+	config.TLSKeyFile = *tlsKeyFile
+	config.TLSClientCAFile = *tlsClientCAFile
+	config.IngestMTLSAllowedSANs = *ingestMTLSAllowedSANs
+	config.RedisTLS = *redisTLS
+	config.RedisTLSCAFile = *redisTLSCAFile
+	config.RedisTLSCertFile = *redisTLSCertFile
+	config.RedisTLSKeyFile = *redisTLSKeyFile
+	config.RedisTLSServerName = *redisTLSServerName
+
+	// Validate TLS configuration
+	if (*tlsCertFile != "" && *tlsKeyFile == "") || (*tlsCertFile == "" && *tlsKeyFile != "") {
+		utils.WriteLog("fatal", "TLS cert file and key file must be both set or both unset")
+	}
+	if *ingestMTLSAllowedSANs != "" && *tlsClientCAFile == "" {
+		utils.WriteLog("fatal", "ingestion mTLS requires TLS client CA file to be set")
+	}
+
 	// Read client secret from file if specified
 	if config.OIDCClientSecretFile != "" {
 		secretBytes, err := os.ReadFile(config.OIDCClientSecretFile)
@@ -327,75 +368,25 @@ func main() {
 	utils.WriteLog("info", fmt.Sprintf("Log level is %v", config.LogLevel))
 	utils.WriteLog("info", fmt.Sprintf("Auth mode is %v", config.AuthMode))
 
-	e.GET("/docs/*", echoSwagger.WrapHandler)
-	e.GET("/docs", func(c echo.Context) error {
-		return c.Redirect(http.StatusPermanentRedirect, "docs/")
-	})
-	e.Static("/*", "frontend/dist").Name = "webui-home"
-
-	apiRoute := e.Group("/api/v1")
-
-	// Wire up middleware and routes based on auth mode
-	switch config.AuthMode {
-	case configuration.AuthModeOIDC:
-		// OIDC mode: register auth routes and middleware
-		oidc.RegisterRoutes(apiRoute)
-
-	case configuration.AuthModeNone:
-		// No auth mode: skip all auth
-		apiRoute.GET("/auth/me", oidc.Me).Name = routeNameAuthMe
-		apiRoute.POST("/auth", api.Authenticate).Name = routeNameAuthenticate
-		apiRoute.POST("/authenticate", api.Authenticate).Name = routeNameAuthenticate
-
-	default: // basic mode
-		// Basic auth middleware (existing behavior)
-		apiRoute.Use(middleware.BasicAuthWithConfig(middleware.BasicAuthConfig{
-			Skipper: func(c echo.Context) bool {
-				if configuration.GetConfiguration().DisableAuth {
-					return true
-				}
-				if c.Request().Method == "POST" {
-					return true
-				}
-				if c.Path() == "/api/v1/healthz" {
-					return true
-				}
-				if c.Path() == "/api/v1/auth/me" {
-					return true
-				}
-				return false
-			},
-			Validator: auth.ValidateCredentials,
-		}))
-
-		apiRoute.GET("/auth/me", oidc.Me).Name = routeNameAuthMe
-		apiRoute.POST("/auth", api.Authenticate).Name = routeNameAuthenticate
-		apiRoute.POST("/authenticate", api.Authenticate).Name = routeNameAuthenticate
+	if sans := server.ParseAllowedSANs(config.IngestMTLSAllowedSANs); len(sans) > 0 {
+		utils.WriteLog("info", fmt.Sprintf("Ingest mTLS enabled with allowed SANs: %v", sans))
 	}
 
-	// Build ingest middleware slice (empty when ingest auth is off)
-	var ingestMW []echo.MiddlewareFunc
-	if config.IngestAuth == configuration.AuthModeOIDC {
-		ingestMW = append(ingestMW, oidc.IngestBearerMiddleware())
+	server.RegisterRoutes(e, api.AddEvent)
+
+	addr := fmt.Sprintf("%v:%v", config.ListenAddress, config.ListenPort)
+	if config.TLSCertFile != "" && config.TLSKeyFile != "" {
+		srv, err := server.NewHTTPSServer(e, addr)
+		if err != nil {
+			utils.WriteLog("fatal", err.Error())
+		}
+		utils.WriteLog("info", "TLS server enabled")
+		if config.TLSClientCAFile != "" {
+			utils.WriteLog("info", "TLS client certificate verification enabled")
+		}
+		e.Logger.Fatal(srv.ListenAndServeTLS("", ""))
 	}
-
-	// Register ingestion endpoints exactly ONCE with middleware slice
-	e.POST("/", api.AddEvent, ingestMW...).Name = AddEvent
-	apiRoute.POST("/", api.AddEvent, ingestMW...).Name = AddEvent
-
-	apiRoute.GET("/config", api.GetConfiguration).Name = "get-configuration"
-	apiRoute.GET("/configuration", api.GetConfiguration).Name = "get-configuration"
-	apiRoute.GET("/version", api.GetVersionInfo).Name = "get-version"
-	apiRoute.GET("/healthz", api.Healthz).Name = "healthz"
-	apiRoute.GET("/outputs", api.GetOutputs).Name = "list-outputs"
-
-	eventsRoute := apiRoute.Group("/events")
-	eventsRoute.POST("/add", api.AddEvent, ingestMW...).Name = AddEvent
-	eventsRoute.GET("/count", api.CountEvent).Name = "count-events"
-	eventsRoute.GET("/count/:groupby", api.CountByEvent).Name = "count-events-by"
-	eventsRoute.GET("/search", api.Search).Name = "search-keys"
-
-	e.Logger.Fatal(e.Start(fmt.Sprintf("%v:%v", config.ListenAddress, config.ListenPort)))
+	e.Logger.Fatal(e.Start(addr))
 }
 
 func (cv *CustomValidator) Validate(i interface{}) error {

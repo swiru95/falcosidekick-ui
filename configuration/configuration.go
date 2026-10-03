@@ -52,6 +52,18 @@ type Configuration struct {
 	IngestOIDCCAFile            string `json:"-"`
 	IngestOIDCJWKSBearerFile    string `json:"-"`
 	IngestOIDCInsecureAllowHTTP bool   `json:"-"`
+	// TLS server fields
+	TLSCertFile     string `json:"-"`
+	TLSKeyFile      string `json:"-"`
+	TLSClientCAFile string `json:"-"`
+	// Ingestion mTLS fields
+	IngestMTLSAllowedSANs string `json:"-"`
+	// Redis TLS fields
+	RedisTLS           bool   `json:"-"`
+	RedisTLSCAFile     string `json:"-"`
+	RedisTLSCertFile   string `json:"-"`
+	RedisTLSKeyFile    string `json:"-"`
+	RedisTLSServerName string `json:"-"`
 }
 
 var config *Configuration
