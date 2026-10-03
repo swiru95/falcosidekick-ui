@@ -15,18 +15,24 @@ limitations under the License.
 package oidc
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/falcosecurity/falcosidekick-ui/configuration"
+	"github.com/falcosecurity/falcosidekick-ui/internal/tlsreload"
 	"github.com/gomodule/redigo/redis"
 )
 
 var (
-	connPoolMutex sync.Mutex
-	connPool      *redis.Pool
+	connPoolMutex     sync.Mutex
+	connPool          *redis.Pool
+	oidcTLSReloader   *tlsreload.Reloader
+	oidcTLSReloaderMu sync.Mutex
 )
 
 // resolveRedisAddr normalizes a Redis address string to host:port format.
@@ -48,6 +54,57 @@ func resolveRedisAddr(s string) string {
 	return net.JoinHostPort(host, port)
 }
 
+// getRedisTLSDialOptions returns TLS-specific dial options for Redis
+func getRedisTLSDialOptions(config *configuration.Configuration) ([]redis.DialOption, error) {
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+
+	// Load CA certificate if provided
+	if config.RedisTLSCAFile != "" {
+		caCert, err := os.ReadFile(config.RedisTLSCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read Redis TLS CA file: %w", err)
+		}
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse Redis TLS CA file")
+		}
+		tlsConfig.RootCAs = caCertPool
+	}
+
+	// Set server name for verification (defaults to host part of Redis address)
+	if config.RedisTLSServerName != "" {
+		tlsConfig.ServerName = config.RedisTLSServerName
+	} else {
+		host, _, err := net.SplitHostPort(resolveRedisAddr(config.RedisServer))
+		if err != nil {
+			host = config.RedisServer
+		}
+		tlsConfig.ServerName = host
+	}
+
+	// Load client certificate if provided
+	if config.RedisTLSCertFile != "" && config.RedisTLSKeyFile != "" {
+		oidcTLSReloaderMu.Lock()
+		if oidcTLSReloader == nil {
+			reloader, err := tlsreload.New(config.RedisTLSCertFile, config.RedisTLSKeyFile, 30*time.Second)
+			if err != nil {
+				oidcTLSReloaderMu.Unlock()
+				return nil, fmt.Errorf("failed to create Redis TLS client cert reloader: %w", err)
+			}
+			oidcTLSReloader = reloader
+		}
+		oidcTLSReloaderMu.Unlock()
+		tlsConfig.GetClientCertificate = oidcTLSReloader.GetClientCertificate
+	}
+
+	dialOpts := make([]redis.DialOption, 0, 2)
+	dialOpts = append(dialOpts, redis.DialUseTLS(true))
+	dialOpts = append(dialOpts, redis.DialTLSConfig(tlsConfig))
+	return dialOpts, nil
+}
+
 // GetRedisConn returns a redis connection from the pool.
 // Uses the same Redis server as configured in the application.
 func GetRedisConn() (redis.Conn, error) {
@@ -67,6 +124,9 @@ func getConnPool() (*redis.Pool, error) {
 		return connPool, nil
 	}
 
+	// Import the helper from the redis package - but we're in oidc package
+	// We'll duplicate the logic here since we're in a different package
+	// and need to maintain separation of concerns
 	config := configuration.GetConfiguration()
 	var dialOpts []redis.DialOption
 
@@ -84,6 +144,16 @@ func getConnPool() (*redis.Pool, error) {
 		redis.DialReadTimeout(5*time.Second),
 		redis.DialWriteTimeout(5*time.Second),
 	)
+
+	// Add TLS options if Redis TLS is enabled
+	if config.RedisTLS {
+		var tlsDialOpts []redis.DialOption
+		tlsDialOpts, err := getRedisTLSDialOptions(config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to configure Redis TLS: %w", err)
+		}
+		dialOpts = append(dialOpts, tlsDialOpts...)
+	}
 
 	// Resolve the Redis address using the helper
 	serverAddress := resolveRedisAddr(config.RedisServer)

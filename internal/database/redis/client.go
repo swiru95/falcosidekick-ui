@@ -48,14 +48,10 @@ func resolveRedisAddr(s string) string {
 // CreateClient creates a new redisearch.Client in the redis package scope.
 func CreateClient() *redisearch.Client {
 	config := configuration.GetConfiguration()
-	var dialOpts []redis.DialOption
-
-	if config.RedisUsername != "" {
-		dialOpts = append(dialOpts, redis.DialUsername(config.RedisUsername))
-	}
-
-	if config.RedisPassword != "" {
-		dialOpts = append(dialOpts, redis.DialPassword(config.RedisPassword))
+	dialOpts, err := getRedisDialOptions()
+	if err != nil {
+		// Log error but don't fatal - let it fail at first use
+		// This allows startup without TLS config issues
 	}
 
 	// Resolve the Redis address using the helper

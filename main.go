@@ -15,12 +15,15 @@ limitations under the License.
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/falcosecurity/falcosidekick-ui/configuration"
 	"github.com/falcosecurity/falcosidekick-ui/internal/api"
@@ -28,6 +31,7 @@ import (
 	"github.com/falcosecurity/falcosidekick-ui/internal/database/redis"
 	"github.com/falcosecurity/falcosidekick-ui/internal/models"
 	"github.com/falcosecurity/falcosidekick-ui/internal/oidc"
+	"github.com/falcosecurity/falcosidekick-ui/internal/tlsreload"
 	"github.com/falcosecurity/falcosidekick-ui/internal/utils"
 	validator "github.com/go-playground/validator/v10"
 	echo "github.com/labstack/echo/v4"
@@ -88,6 +92,19 @@ func init() {
 	ingestOIDCCAFile := utils.GetStringFlagOrEnvParam("ingest-oidc-ca-file", "FALCOSIDEKICK_UI_INGEST_OIDC_CA_FILE", "", "Ingestion OIDC CA file path")
 	ingestOIDCJWKSBearerFile := utils.GetStringFlagOrEnvParam("ingest-oidc-jwks-bearer-file", "FALCOSIDEKICK_UI_INGEST_OIDC_JWKS_BEARER_FILE", "", "Ingestion OIDC JWKS bearer token file")
 	ingestOIDCInsecureAllowHTTP := utils.GetBoolFlagOrEnvParam("ingest-oidc-insecure-allow-http", "FALCOSIDEKICK_UI_INGEST_OIDC_INSECURE_ALLOW_HTTP", false, "Allow HTTP for ingestion OIDC (dev only)")
+
+	// TLS server flags
+	tlsCertFile := utils.GetStringFlagOrEnvParam("tls-cert-file", "FALCOSIDEKICK_UI_TLS_CERT_FILE", "", "TLS certificate file path")
+	tlsKeyFile := utils.GetStringFlagOrEnvParam("tls-key-file", "FALCOSIDEKICK_UI_TLS_KEY_FILE", "", "TLS key file path")
+	tlsClientCAFile := utils.GetStringFlagOrEnvParam("tls-client-ca-file", "FALCOSIDEKICK_UI_TLS_CLIENT_CA_FILE", "", "TLS client CA file path")
+	// Ingestion mTLS flags
+	ingestMTLSAllowedSANs := utils.GetStringFlagOrEnvParam("ingest-mtls-allowed-sans", "FALCOSIDEKICK_UI_INGEST_MTLS_ALLOWED_SANS", "", "Ingestion mTLS allowed SANs (comma-separated)")
+	// Redis TLS flags
+	redisTLS := utils.GetBoolFlagOrEnvParam("redis-tls", "FALCOSIDEKICK_UI_REDIS_TLS", false, "Enable Redis TLS")
+	redisTLSCAFile := utils.GetStringFlagOrEnvParam("redis-tls-ca-file", "FALCOSIDEKICK_UI_REDIS_TLS_CA_FILE", "", "Redis TLS CA file path")
+	redisTLSCertFile := utils.GetStringFlagOrEnvParam("redis-tls-cert-file", "FALCOSIDEKICK_UI_REDIS_TLS_CERT_FILE", "", "Redis TLS certificate file path")
+	redisTLSKeyFile := utils.GetStringFlagOrEnvParam("redis-tls-key-file", "FALCOSIDEKICK_UI_REDIS_TLS_KEY_FILE", "", "Redis TLS key file path")
+	redisTLSServerName := utils.GetStringFlagOrEnvParam("redis-tls-server-name", "FALCOSIDEKICK_UI_REDIS_TLS_SERVER_NAME", "", "Redis TLS server name")
 
 	flag.Usage = func() {
 		help := `Usage of Falcosidekick-UI:
@@ -255,6 +272,25 @@ func init() {
 	config.IngestOIDCJWKSBearerFile = *ingestOIDCJWKSBearerFile
 	config.IngestOIDCInsecureAllowHTTP = *ingestOIDCInsecureAllowHTTP
 
+	// Set TLS configuration
+	config.TLSCertFile = *tlsCertFile
+	config.TLSKeyFile = *tlsKeyFile
+	config.TLSClientCAFile = *tlsClientCAFile
+	config.IngestMTLSAllowedSANs = *ingestMTLSAllowedSANs
+	config.RedisTLS = *redisTLS
+	config.RedisTLSCAFile = *redisTLSCAFile
+	config.RedisTLSCertFile = *redisTLSCertFile
+	config.RedisTLSKeyFile = *redisTLSKeyFile
+	config.RedisTLSServerName = *redisTLSServerName
+
+	// Validate TLS configuration
+	if (*tlsCertFile != "" && *tlsKeyFile == "") || (*tlsCertFile == "" && *tlsKeyFile != "") {
+		utils.WriteLog("fatal", "TLS cert file and key file must be both set or both unset")
+	}
+	if *ingestMTLSAllowedSANs != "" && *tlsClientCAFile == "" {
+		utils.WriteLog("fatal", "ingestion mTLS requires TLS client CA file to be set")
+	}
+
 	// Read client secret from file if specified
 	if config.OIDCClientSecretFile != "" {
 		secretBytes, err := os.ReadFile(config.OIDCClientSecretFile)
@@ -378,6 +414,9 @@ func main() {
 	if config.IngestAuth == configuration.AuthModeOIDC {
 		ingestMW = append(ingestMW, oidc.IngestBearerMiddleware())
 	}
+	if config.IngestMTLSAllowedSANs != "" {
+		ingestMW = append(ingestMW, createIngestMTLSMiddleware())
+	}
 
 	// Register ingestion endpoints exactly ONCE with middleware slice
 	e.POST("/", api.AddEvent, ingestMW...).Name = AddEvent
@@ -395,7 +434,109 @@ func main() {
 	eventsRoute.GET("/count/:groupby", api.CountByEvent).Name = "count-events-by"
 	eventsRoute.GET("/search", api.Search).Name = "search-keys"
 
-	e.Logger.Fatal(e.Start(fmt.Sprintf("%v:%v", config.ListenAddress, config.ListenPort)))
+	// Start server with or without TLS
+	addr := fmt.Sprintf("%v:%v", config.ListenAddress, config.ListenPort)
+	if config.TLSCertFile != "" && config.TLSKeyFile != "" {
+		utils.WriteLog("info", "TLS server enabled")
+		reloader, err := tlsreload.New(config.TLSCertFile, config.TLSKeyFile, 30*time.Second)
+		if err != nil {
+			utils.WriteLog("fatal", fmt.Sprintf("failed to create TLS cert reloader: %v", err))
+		}
+
+		tlsConfig := &tls.Config{
+			MinVersion:     tls.VersionTLS12,
+			GetCertificate: reloader.GetCertificate,
+		}
+
+		if config.TLSClientCAFile != "" {
+			caCert, err := os.ReadFile(config.TLSClientCAFile)
+			if err != nil {
+				utils.WriteLog("fatal", fmt.Sprintf("failed to read client CA file: %v", err))
+			}
+			caCertPool := x509.NewCertPool()
+			if !caCertPool.AppendCertsFromPEM(caCert) {
+				utils.WriteLog("fatal", "failed to parse client CA file")
+			}
+			tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
+			tlsConfig.ClientCAs = caCertPool
+			utils.WriteLog("info", "TLS client certificate verification enabled")
+		}
+
+		server := &http.Server{
+			Handler:           e,
+			TLSConfig:         tlsConfig,
+			ReadHeaderTimeout: 30 * time.Second,
+		}
+
+		listener, err := net.Listen("tcp", addr)
+		if err != nil {
+			utils.WriteLog("fatal", fmt.Sprintf("failed to listen: %v", err))
+		}
+		tlsListener := tls.NewListener(listener, tlsConfig)
+		e.Logger.Fatal(server.Serve(tlsListener))
+	} else {
+		e.Logger.Fatal(e.Start(addr))
+	}
+}
+
+// createIngestMTLSMiddleware creates a middleware that verifies client certificates against allowed SANs
+func createIngestMTLSMiddleware() echo.MiddlewareFunc {
+	allowedSANs := strings.Split(configuration.GetConfiguration().IngestMTLSAllowedSANs, ",")
+	// Trim and filter empty entries
+	var sanitized []string
+	for _, san := range allowedSANs {
+		trimmed := strings.TrimSpace(san)
+		if trimmed != "" {
+			sanitized = append(sanitized, trimmed)
+		}
+	}
+
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			tlsConn := c.Request().TLS
+			if tlsConn == nil || len(tlsConn.VerifiedChains) == 0 {
+				return c.JSON(http.StatusForbidden, map[string]string{"error": "client certificate required"})
+			}
+
+			peerCert := tlsConn.PeerCertificates[0]
+			var presentedSANs []string
+
+			// Check DNS names
+			for _, dnsName := range peerCert.DNSNames {
+				presentedSANs = append(presentedSANs, dnsName)
+				for _, allowed := range sanitized {
+					if dnsName == allowed {
+						return next(c)
+					}
+				}
+			}
+
+			// Check URIs
+			for _, uri := range peerCert.URIs {
+				uriStr := uri.String()
+				presentedSANs = append(presentedSANs, uriStr)
+				for _, allowed := range sanitized {
+					if uriStr == allowed {
+						return next(c)
+					}
+				}
+			}
+
+			// Check CommonName
+			cn := peerCert.Subject.CommonName
+			if cn != "" {
+				presentedSANs = append(presentedSANs, cn)
+				for _, allowed := range sanitized {
+					if cn == allowed {
+						return next(c)
+					}
+				}
+			}
+
+			utils.WriteLog("warning", fmt.Sprintf("ingestion mTLS verification failed; presented SANs: %v", presentedSANs))
+			return c.JSON(http.StatusForbidden, map[string]string{"error": "client certificate SAN not allowed"})
+		}
+	}
 }
 
 func (cv *CustomValidator) Validate(i interface{}) error {
