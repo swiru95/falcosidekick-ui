@@ -15,29 +15,23 @@ limitations under the License.
 package main
 
 import (
-	"crypto/tls"
-	"crypto/x509"
 	"flag"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/falcosecurity/falcosidekick-ui/configuration"
 	"github.com/falcosecurity/falcosidekick-ui/internal/api"
-	"github.com/falcosecurity/falcosidekick-ui/internal/auth"
 	"github.com/falcosecurity/falcosidekick-ui/internal/database/redis"
 	"github.com/falcosecurity/falcosidekick-ui/internal/models"
 	"github.com/falcosecurity/falcosidekick-ui/internal/oidc"
-	"github.com/falcosecurity/falcosidekick-ui/internal/tlsreload"
+	"github.com/falcosecurity/falcosidekick-ui/internal/server"
 	"github.com/falcosecurity/falcosidekick-ui/internal/utils"
 	validator "github.com/go-playground/validator/v10"
 	echo "github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
-	echoSwagger "github.com/swaggo/echo-swagger"
 
 	_ "github.com/falcosecurity/falcosidekick-ui/docs"
 )
@@ -45,14 +39,6 @@ import (
 type CustomValidator struct {
 	validator *validator.Validate
 }
-
-const AddEvent = "add-event"
-
-// Route name constants
-const (
-	routeNameAuthMe       = "auth-me"
-	routeNameAuthenticate = "authenticate"
-)
 
 func init() {
 	addr := utils.GetStringFlagOrEnvParam("a", "FALCOSIDEKICK_UI_ADDR", "0.0.0.0", "Listen Address")
@@ -133,6 +119,8 @@ func init() {
 	      Ingestion OIDC JWKS bearer token file (default "", environment "FALCOSIDEKICK_UI_INGEST_OIDC_JWKS_BEARER_FILE")
 	-ingest-oidc-required-scope string
 	      Ingestion OIDC required scope (default "", environment "FALCOSIDEKICK_UI_INGEST_OIDC_REQUIRED_SCOPE")
+	-ingest-mtls-allowed-sans string
+	      Ingestion mTLS allowed client certificate SANs comma-separated (default "", environment "FALCOSIDEKICK_UI_INGEST_MTLS_ALLOWED_SANS")
 	-l string
 	      Log level: "debug", "info", "warning", "error" (default "info",  environment "FALCOSIDEKICK_UI_LOGLEVEL")
 	-oidc-allowed-groups string
@@ -163,6 +151,16 @@ func init() {
 	      Listen Port (default "2802", environment "FALCOSIDEKICK_UI_PORT")
 	-r string
 	      Redis server address (default "localhost:6379", environment "FALCOSIDEKICK_UI_REDIS_URL")
+	-redis-tls boolean
+	      Enable Redis TLS (environment "FALCOSIDEKICK_UI_REDIS_TLS")
+	-redis-tls-ca-file string
+	      Redis TLS CA file path (default "", environment "FALCOSIDEKICK_UI_REDIS_TLS_CA_FILE")
+	-redis-tls-cert-file string
+	      Redis TLS client certificate file path (default "", environment "FALCOSIDEKICK_UI_REDIS_TLS_CERT_FILE")
+	-redis-tls-key-file string
+	      Redis TLS client key file path (default "", environment "FALCOSIDEKICK_UI_REDIS_TLS_KEY_FILE")
+	-redis-tls-server-name string
+	      Redis TLS server name (default: host of the Redis address, environment "FALCOSIDEKICK_UI_REDIS_TLS_SERVER_NAME")
 	-session-idle-timeout string
 	      Session idle timeout (default "1h", environment "FALCOSIDEKICK_UI_SESSION_IDLE_TIMEOUT")
 	-session-ttl string
@@ -170,6 +168,12 @@ func init() {
 	-t string
 	      TTL for keys, the format is X<unit>,
 	      with unit (s, m, h, d, W, M, y)" (default "0", environment "FALCOSIDEKICK_UI_TTL")
+	-tls-cert-file string
+	      TLS server certificate file path (default "", environment "FALCOSIDEKICK_UI_TLS_CERT_FILE")
+	-tls-client-ca-file string
+	      TLS client CA file path, enables optional client certificate verification (default "", environment "FALCOSIDEKICK_UI_TLS_CLIENT_CA_FILE")
+	-tls-key-file string
+	      TLS server key file path (default "", environment "FALCOSIDEKICK_UI_TLS_KEY_FILE")
 	-u string
 	      User in format <login>:<password> (default "admin:admin", environment "FALCOSIDEKICK_UI_USER")
 	-v boolean
@@ -364,210 +368,25 @@ func main() {
 	utils.WriteLog("info", fmt.Sprintf("Log level is %v", config.LogLevel))
 	utils.WriteLog("info", fmt.Sprintf("Auth mode is %v", config.AuthMode))
 
-	// Log ingest mTLS configuration
-	if config.IngestMTLSAllowedSANs != "" {
-		allowedSANs := strings.Split(config.IngestMTLSAllowedSANs, ",")
-		var sanitized []string
-		for _, san := range allowedSANs {
-			trimmed := strings.TrimSpace(san)
-			if trimmed != "" {
-				sanitized = append(sanitized, trimmed)
-			}
-		}
-		utils.WriteLog("info", fmt.Sprintf("Ingest mTLS enabled with allowed SANs: %v", sanitized))
+	if sans := server.ParseAllowedSANs(config.IngestMTLSAllowedSANs); len(sans) > 0 {
+		utils.WriteLog("info", fmt.Sprintf("Ingest mTLS enabled with allowed SANs: %v", sans))
 	}
 
-	e.GET("/docs/*", echoSwagger.WrapHandler)
-	e.GET("/docs", func(c echo.Context) error {
-		return c.Redirect(http.StatusPermanentRedirect, "docs/")
-	})
-	e.Static("/*", "frontend/dist").Name = "webui-home"
+	server.RegisterRoutes(e, api.AddEvent)
 
-	apiRoute := e.Group("/api/v1")
-
-	// Wire up middleware and routes based on auth mode
-	switch config.AuthMode {
-	case configuration.AuthModeOIDC:
-		// OIDC mode: register auth routes and middleware
-		oidc.RegisterRoutes(apiRoute)
-
-	case configuration.AuthModeNone:
-		// No auth mode: skip all auth
-		apiRoute.GET("/auth/me", oidc.Me).Name = routeNameAuthMe
-		apiRoute.POST("/auth", api.Authenticate).Name = routeNameAuthenticate
-		apiRoute.POST("/authenticate", api.Authenticate).Name = routeNameAuthenticate
-
-	default: // basic mode
-		// Basic auth middleware (existing behavior)
-		apiRoute.Use(middleware.BasicAuthWithConfig(middleware.BasicAuthConfig{
-			Skipper: func(c echo.Context) bool {
-				if configuration.GetConfiguration().DisableAuth {
-					return true
-				}
-				if c.Request().Method == "POST" {
-					return true
-				}
-				if c.Path() == "/api/v1/healthz" {
-					return true
-				}
-				if c.Path() == "/api/v1/auth/me" {
-					return true
-				}
-				return false
-			},
-			Validator: auth.ValidateCredentials,
-		}))
-
-		apiRoute.GET("/auth/me", oidc.Me).Name = routeNameAuthMe
-		apiRoute.POST("/auth", api.Authenticate).Name = routeNameAuthenticate
-		apiRoute.POST("/authenticate", api.Authenticate).Name = routeNameAuthenticate
-	}
-
-	// Build ingest middleware slice (empty when ingest auth is off)
-	var ingestMW []echo.MiddlewareFunc
-	if config.IngestAuth == configuration.AuthModeOIDC {
-		ingestMW = append(ingestMW, oidc.IngestBearerMiddleware())
-	}
-	if config.IngestMTLSAllowedSANs != "" {
-		ingestMW = append(ingestMW, createIngestMTLSMiddleware())
-	}
-
-	// Register ingestion endpoints exactly ONCE with middleware slice
-	e.POST("/", api.AddEvent, ingestMW...).Name = AddEvent
-	apiRoute.POST("/", api.AddEvent, ingestMW...).Name = AddEvent
-
-	apiRoute.GET("/config", api.GetConfiguration).Name = "get-configuration"
-	apiRoute.GET("/configuration", api.GetConfiguration).Name = "get-configuration"
-	apiRoute.GET("/version", api.GetVersionInfo).Name = "get-version"
-	apiRoute.GET("/healthz", api.Healthz).Name = "healthz"
-	apiRoute.GET("/outputs", api.GetOutputs).Name = "list-outputs"
-
-	eventsRoute := apiRoute.Group("/events")
-	eventsRoute.POST("/add", api.AddEvent, ingestMW...).Name = AddEvent
-	eventsRoute.GET("/count", api.CountEvent).Name = "count-events"
-	eventsRoute.GET("/count/:groupby", api.CountByEvent).Name = "count-events-by"
-	eventsRoute.GET("/search", api.Search).Name = "search-keys"
-
-	// Start server with or without TLS
 	addr := fmt.Sprintf("%v:%v", config.ListenAddress, config.ListenPort)
 	if config.TLSCertFile != "" && config.TLSKeyFile != "" {
-		utils.WriteLog("info", "TLS server enabled")
-		reloader, err := tlsreload.New(config.TLSCertFile, config.TLSKeyFile, 30*time.Second)
+		srv, err := server.NewHTTPSServer(e, addr)
 		if err != nil {
-			utils.WriteLog("fatal", fmt.Sprintf("failed to create TLS cert reloader: %v", err))
+			utils.WriteLog("fatal", err.Error())
 		}
-
-		tlsConfig := &tls.Config{
-			MinVersion:     tls.VersionTLS12,
-			GetCertificate: reloader.GetCertificate,
-		}
-
+		utils.WriteLog("info", "TLS server enabled")
 		if config.TLSClientCAFile != "" {
-			caCert, err := os.ReadFile(config.TLSClientCAFile)
-			if err != nil {
-				utils.WriteLog("fatal", fmt.Sprintf("failed to read client CA file: %v", err))
-			}
-			caCertPool := x509.NewCertPool()
-			if !caCertPool.AppendCertsFromPEM(caCert) {
-				utils.WriteLog("fatal", "failed to parse client CA file")
-			}
-			tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
-			tlsConfig.ClientCAs = caCertPool
 			utils.WriteLog("info", "TLS client certificate verification enabled")
 		}
-
-		server := &http.Server{
-			Handler:           e,
-			TLSConfig:         tlsConfig,
-			ReadHeaderTimeout: 30 * time.Second,
-		}
-
-		listener, err := net.Listen("tcp", addr)
-		if err != nil {
-			utils.WriteLog("fatal", fmt.Sprintf("failed to listen: %v", err))
-		}
-		tlsListener := tls.NewListener(listener, tlsConfig)
-		e.Logger.Fatal(server.Serve(tlsListener))
-	} else {
-		e.Logger.Fatal(e.Start(addr))
+		e.Logger.Fatal(srv.ListenAndServeTLS("", ""))
 	}
-}
-
-// createIngestMTLSMiddleware creates a middleware that verifies client certificates against allowed SANs.
-// Logs presented SANs once (deduped) on failure.
-func createIngestMTLSMiddleware() echo.MiddlewareFunc {
-	allowedSANs := strings.Split(configuration.GetConfiguration().IngestMTLSAllowedSANs, ",")
-	// Trim and filter empty entries
-	var sanitized []string
-	for _, san := range allowedSANs {
-		trimmed := strings.TrimSpace(san)
-		if trimmed != "" {
-			sanitized = append(sanitized, trimmed)
-		}
-	}
-
-	// Track logged SAN sets to avoid duplicate log messages
-	loggedSANSets := make(map[string]bool)
-	var loggedSetsMu sync.Mutex
-
-	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c echo.Context) error {
-			tlsConn := c.Request().TLS
-			if tlsConn == nil || len(tlsConn.VerifiedChains) == 0 {
-				return c.JSON(http.StatusForbidden, map[string]string{"error": "client certificate required"})
-			}
-
-			peerCert := tlsConn.PeerCertificates[0]
-			presentedSANsSet := make(map[string]bool)
-
-			// Check DNS names
-			for _, dnsName := range peerCert.DNSNames {
-				presentedSANsSet[dnsName] = true
-				for _, allowed := range sanitized {
-					if dnsName == allowed {
-						return next(c)
-					}
-				}
-			}
-
-			// Check URIs
-			for _, uri := range peerCert.URIs {
-				uriStr := uri.String()
-				presentedSANsSet[uriStr] = true
-				for _, allowed := range sanitized {
-					if uriStr == allowed {
-						return next(c)
-					}
-				}
-			}
-
-			// Check CommonName
-			cn := peerCert.Subject.CommonName
-			if cn != "" {
-				presentedSANsSet[cn] = true
-				for _, allowed := range sanitized {
-					if cn == allowed {
-						return next(c)
-					}
-				}
-			}
-
-			// Log presented SANs once per unique set
-			var presentedSANs []string
-			for san := range presentedSANsSet {
-				presentedSANs = append(presentedSANs, san)
-			}
-			sanKey := fmt.Sprintf("%v", presentedSANs)
-			loggedSetsMu.Lock()
-			if !loggedSANSets[sanKey] {
-				loggedSANSets[sanKey] = true
-				utils.WriteLog("warning", fmt.Sprintf("ingestion mTLS verification failed; presented SANs: %v", presentedSANs))
-			}
-			loggedSetsMu.Unlock()
-
-			return c.JSON(http.StatusForbidden, map[string]string{"error": "client certificate SAN not allowed"})
-		}
-	}
+	e.Logger.Fatal(e.Start(addr))
 }
 
 func (cv *CustomValidator) Validate(i interface{}) error {

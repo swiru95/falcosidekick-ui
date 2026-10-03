@@ -29,8 +29,10 @@ import (
 )
 
 var (
-	tlsReloader   *tlsreload.Reloader
-	tlsReloaderMu sync.Mutex
+	// clientCertReloadInterval is how often the client cert files are checked; tests lower it.
+	clientCertReloadInterval = 30 * time.Second
+	tlsReloader              *tlsreload.Reloader
+	tlsReloaderMu            sync.Mutex
 )
 
 // DialOptions returns dial options configured for TLS if enabled, with username/password
@@ -81,7 +83,7 @@ func DialOptions() ([]redis.DialOption, error) {
 		if config.RedisTLSCertFile != "" && config.RedisTLSKeyFile != "" {
 			tlsReloaderMu.Lock()
 			if tlsReloader == nil {
-				reloader, err := tlsreload.New(config.RedisTLSCertFile, config.RedisTLSKeyFile, 30*time.Second)
+				reloader, err := tlsreload.New(config.RedisTLSCertFile, config.RedisTLSKeyFile, clientCertReloadInterval)
 				if err != nil {
 					tlsReloaderMu.Unlock()
 					return nil, fmt.Errorf("failed to create Redis TLS client cert reloader: %w", err)

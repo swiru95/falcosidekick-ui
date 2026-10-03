@@ -17,9 +17,9 @@ package redis
 import (
 	"fmt"
 	"net"
-	"os"
 
 	"github.com/falcosecurity/falcosidekick-ui/configuration"
+	"github.com/falcosecurity/falcosidekick-ui/internal/utils"
 
 	"github.com/Issif/redisearch-go/redisearch"
 	"github.com/gomodule/redigo/redis"
@@ -52,10 +52,7 @@ func CreateClient() *redisearch.Client {
 	config := configuration.GetConfiguration()
 	dialOpts, err := DialOptions()
 	if err != nil {
-		// Fatal: TLS/Redis-TLS config errors must not be swallowed
-		// This is called from main.init(), so WriteLog will work
-		fmt.Printf("fatal: %v\n", err)
-		os.Exit(1)
+		utils.WriteLog("fatal", err.Error())
 	}
 
 	// Resolve the Redis address using the helper
