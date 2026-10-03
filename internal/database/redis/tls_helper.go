@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/falcosecurity/falcosidekick-ui/configuration"
@@ -27,10 +28,14 @@ import (
 	"github.com/gomodule/redigo/redis"
 )
 
-var tlsReloader *tlsreload.Reloader
+var (
+	tlsReloader   *tlsreload.Reloader
+	tlsReloaderMu sync.Mutex
+)
 
-// getRedisDialOptions returns dial options configured for TLS if enabled
-func getRedisDialOptions() ([]redis.DialOption, error) {
+// DialOptions returns dial options configured for TLS if enabled, with username/password
+// and a singleton mutex-guarded client-cert reloader.
+func DialOptions() ([]redis.DialOption, error) {
 	config := configuration.GetConfiguration()
 	var dialOpts []redis.DialOption
 
@@ -74,13 +79,16 @@ func getRedisDialOptions() ([]redis.DialOption, error) {
 
 		// Load client certificate if provided
 		if config.RedisTLSCertFile != "" && config.RedisTLSKeyFile != "" {
+			tlsReloaderMu.Lock()
 			if tlsReloader == nil {
 				reloader, err := tlsreload.New(config.RedisTLSCertFile, config.RedisTLSKeyFile, 30*time.Second)
 				if err != nil {
+					tlsReloaderMu.Unlock()
 					return nil, fmt.Errorf("failed to create Redis TLS client cert reloader: %w", err)
 				}
 				tlsReloader = reloader
 			}
+			tlsReloaderMu.Unlock()
 			tlsConfig.GetClientCertificate = tlsReloader.GetClientCertificate
 		}
 

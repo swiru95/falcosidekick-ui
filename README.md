@@ -226,34 +226,70 @@ Configure your Falcosidekick backend to authenticate ingestion requests. Refer t
 ### Options
 #### Precedence: flag value -> environment variable value -> default value
 
-```shell
-Usage of Falcosidekick-UI:
--a string
-      Listen Address (default "0.0.0.0", environment "FALCOSIDEKICK_UI_ADDR")
--d boolean
-      Disable authentication (environment "FALCOSIDEKICK_UI_DISABLEAUTH")
--l string
-      Log level: "debug", "info", "warning", "error" (default "info",  environment "FALCOSIDEKICK_UI_LOGLEVEL")
--p int
-      Listen Port (default "2802", environment "FALCOSIDEKICK_UI_PORT")
--r string
-      Redis server address (default "localhost:6379", environment "FALCOSIDEKICK_UI_REDIS_URL")
--t string
-      TTL for keys, the format is X<unit>,
-      with unit (s, m, h, d, W, M, y)" (default "0", environment "FALCOSIDEKICK_UI_TTL")
--u string
-      User in format <login>:<password> (default "admin:admin", environment "FALCOSIDEKICK_UI_USER")
--v boolean
-      Display version
--w string
-      Redis password (default "", environment "FALCOSIDEKICK_UI_REDIS_PASSWORD")
--x boolean
-      Allow CORS for development (environment "FALCOSIDEKICK_UI_DEV")
--y string
-      Redis username (default "", environment "FALCOSIDEKICK_UI_REDIS_USERNAME")
-```
+**Core Options:**
 
-> If not user is set and the authentication is not disabled, the default user is `admin:admin`
+| Flag | Environment Variable | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `-a` | `FALCOSIDEKICK_UI_ADDR` | `0.0.0.0` | Listen address |
+| `-p` | `FALCOSIDEKICK_UI_PORT` | `2802` | Listen port |
+| `-r` | `FALCOSIDEKICK_UI_REDIS_URL` | `localhost:6379` | Redis server address |
+| `-y` | `FALCOSIDEKICK_UI_REDIS_USERNAME` | `` | Redis username |
+| `-w` | `FALCOSIDEKICK_UI_REDIS_PASSWORD` | `` | Redis password |
+| `-t` | `FALCOSIDEKICK_UI_TTL` | `0s` | TTL for keys (format: X<unit>, units: s, m, h, d, W, M, y) |
+| `-u` | `FALCOSIDEKICK_UI_USER` | `admin:admin` | Basic auth user (format: `<login>:<password>`) |
+| `-l` | `FALCOSIDEKICK_UI_LOGLEVEL` | `info` | Log level (debug, info, warning, error) |
+| `-d` | `FALCOSIDEKICK_UI_DISABLEAUTH` | `false` | Disable all authentication |
+| `-x` | `FALCOSIDEKICK_UI_DEV` | `false` | Allow CORS for development |
+| `-v` | - | - | Display version |
+
+**TLS Server Options (for HTTPS):**
+
+| Flag | Environment Variable | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `-tls-cert-file` | `FALCOSIDEKICK_UI_TLS_CERT_FILE` | `` | TLS server certificate file path (PEM format; requires `-tls-key-file`) |
+| `-tls-key-file` | `FALCOSIDEKICK_UI_TLS_KEY_FILE` | `` | TLS server key file path (PEM format; requires `-tls-cert-file`) |
+| `-tls-client-ca-file` | `FALCOSIDEKICK_UI_TLS_CLIENT_CA_FILE` | `` | TLS client CA file for optional client certificate verification (PEM format) |
+
+**Ingest mTLS Options:**
+
+| Flag | Environment Variable | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `-ingest-mtls-allowed-sans` | `FALCOSIDEKICK_UI_INGEST_MTLS_ALLOWED_SANS` | `` | Comma-separated list of allowed client certificate SANs for ingestion endpoints (requires `-tls-client-ca-file`; ingestion uses mTLS in addition to bearer tokens) |
+
+**Redis TLS Options:**
+
+| Flag | Environment Variable | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `-redis-tls` | `FALCOSIDEKICK_UI_REDIS_TLS` | `false` | Enable TLS for Redis connection |
+| `-redis-tls-ca-file` | `FALCOSIDEKICK_UI_REDIS_TLS_CA_FILE` | `` | Redis TLS CA file path (PEM format) |
+| `-redis-tls-cert-file` | `FALCOSIDEKICK_UI_REDIS_TLS_CERT_FILE` | `` | Redis TLS client certificate file path (PEM format; optional; use with `-redis-tls-key-file`) |
+| `-redis-tls-key-file` | `FALCOSIDEKICK_UI_REDIS_TLS_KEY_FILE` | `` | Redis TLS client key file path (PEM format; optional; use with `-redis-tls-cert-file`) |
+| `-redis-tls-server-name` | `FALCOSIDEKICK_UI_REDIS_TLS_SERVER_NAME` | `` | Redis server name for TLS verification (default: hostname from Redis address) |
+
+> If no user is set and authentication is not disabled, the default user is `admin:admin`
+
+### TLS
+
+**HTTPS Server (TLS Termination):**
+- Set `-tls-cert-file` and `-tls-key-file` to enable HTTPS on the UI (both required)
+- Certificates are automatically reloaded on file changes (hot reload)
+- The UI listens on the same address/port but with HTTPS
+- Optional client certificate verification: set `-tls-client-ca-file` to enable `VerifyClientCertIfGiven` (browsers and Envoy without certs still work)
+
+**Ingestion mTLS (ingest endpoints):**
+- Requires both `-tls-client-ca-file` and `-ingest-mtls-allowed-sans` to be set
+- Applied to: `POST /`, `POST /api/v1/`, `POST /api/v1/events/add`
+- Verifies the presented client certificate's DNS SAN, URI SAN, or CN against the allowed list
+- Returns 403 if certificate SAN is not in the allowlist or no certificate is present
+- Non-ingestion routes are unaffected (no mTLS requirement)
+- Logs presented SANs once per unique set on rejection (deduped)
+- **Note:** Both mTLS and bearer token authentication can be configured; both are checked when enabled
+
+**Redis TLS (client to Redis):**
+- Set `-redis-tls true` to enable TLS for Redis connections
+- CA certificate required for server verification (set `-redis-tls-ca-file`)
+- Client certificate optional for mutual TLS (set `-redis-tls-cert-file` and `-redis-tls-key-file`); reloads automatically
+- Server name verification: uses the hostname from `-r` address or explicit `-redis-tls-server-name`
 
 ### Run with docker
 

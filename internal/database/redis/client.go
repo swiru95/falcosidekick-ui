@@ -17,6 +17,7 @@ package redis
 import (
 	"fmt"
 	"net"
+	"os"
 
 	"github.com/falcosecurity/falcosidekick-ui/configuration"
 
@@ -46,12 +47,15 @@ func resolveRedisAddr(s string) string {
 }
 
 // CreateClient creates a new redisearch.Client in the redis package scope.
+// Any TLS/Redis-TLS configuration error is fatal at startup.
 func CreateClient() *redisearch.Client {
 	config := configuration.GetConfiguration()
-	dialOpts, err := getRedisDialOptions()
+	dialOpts, err := DialOptions()
 	if err != nil {
-		// Log error but don't fatal - let it fail at first use
-		// This allows startup without TLS config issues
+		// Fatal: TLS/Redis-TLS config errors must not be swallowed
+		// This is called from main.init(), so WriteLog will work
+		fmt.Printf("fatal: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Resolve the Redis address using the helper

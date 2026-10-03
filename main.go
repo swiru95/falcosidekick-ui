@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/falcosecurity/falcosidekick-ui/configuration"
@@ -363,6 +364,19 @@ func main() {
 	utils.WriteLog("info", fmt.Sprintf("Log level is %v", config.LogLevel))
 	utils.WriteLog("info", fmt.Sprintf("Auth mode is %v", config.AuthMode))
 
+	// Log ingest mTLS configuration
+	if config.IngestMTLSAllowedSANs != "" {
+		allowedSANs := strings.Split(config.IngestMTLSAllowedSANs, ",")
+		var sanitized []string
+		for _, san := range allowedSANs {
+			trimmed := strings.TrimSpace(san)
+			if trimmed != "" {
+				sanitized = append(sanitized, trimmed)
+			}
+		}
+		utils.WriteLog("info", fmt.Sprintf("Ingest mTLS enabled with allowed SANs: %v", sanitized))
+	}
+
 	e.GET("/docs/*", echoSwagger.WrapHandler)
 	e.GET("/docs", func(c echo.Context) error {
 		return c.Redirect(http.StatusPermanentRedirect, "docs/")
@@ -479,7 +493,8 @@ func main() {
 	}
 }
 
-// createIngestMTLSMiddleware creates a middleware that verifies client certificates against allowed SANs
+// createIngestMTLSMiddleware creates a middleware that verifies client certificates against allowed SANs.
+// Logs presented SANs once (deduped) on failure.
 func createIngestMTLSMiddleware() echo.MiddlewareFunc {
 	allowedSANs := strings.Split(configuration.GetConfiguration().IngestMTLSAllowedSANs, ",")
 	// Trim and filter empty entries
@@ -491,6 +506,10 @@ func createIngestMTLSMiddleware() echo.MiddlewareFunc {
 		}
 	}
 
+	// Track logged SAN sets to avoid duplicate log messages
+	loggedSANSets := make(map[string]bool)
+	var loggedSetsMu sync.Mutex
+
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			tlsConn := c.Request().TLS
@@ -499,11 +518,11 @@ func createIngestMTLSMiddleware() echo.MiddlewareFunc {
 			}
 
 			peerCert := tlsConn.PeerCertificates[0]
-			var presentedSANs []string
+			presentedSANsSet := make(map[string]bool)
 
 			// Check DNS names
 			for _, dnsName := range peerCert.DNSNames {
-				presentedSANs = append(presentedSANs, dnsName)
+				presentedSANsSet[dnsName] = true
 				for _, allowed := range sanitized {
 					if dnsName == allowed {
 						return next(c)
@@ -514,7 +533,7 @@ func createIngestMTLSMiddleware() echo.MiddlewareFunc {
 			// Check URIs
 			for _, uri := range peerCert.URIs {
 				uriStr := uri.String()
-				presentedSANs = append(presentedSANs, uriStr)
+				presentedSANsSet[uriStr] = true
 				for _, allowed := range sanitized {
 					if uriStr == allowed {
 						return next(c)
@@ -525,7 +544,7 @@ func createIngestMTLSMiddleware() echo.MiddlewareFunc {
 			// Check CommonName
 			cn := peerCert.Subject.CommonName
 			if cn != "" {
-				presentedSANs = append(presentedSANs, cn)
+				presentedSANsSet[cn] = true
 				for _, allowed := range sanitized {
 					if cn == allowed {
 						return next(c)
@@ -533,7 +552,19 @@ func createIngestMTLSMiddleware() echo.MiddlewareFunc {
 				}
 			}
 
-			utils.WriteLog("warning", fmt.Sprintf("ingestion mTLS verification failed; presented SANs: %v", presentedSANs))
+			// Log presented SANs once per unique set
+			var presentedSANs []string
+			for san := range presentedSANsSet {
+				presentedSANs = append(presentedSANs, san)
+			}
+			sanKey := fmt.Sprintf("%v", presentedSANs)
+			loggedSetsMu.Lock()
+			if !loggedSANSets[sanKey] {
+				loggedSANSets[sanKey] = true
+				utils.WriteLog("warning", fmt.Sprintf("ingestion mTLS verification failed; presented SANs: %v", presentedSANs))
+			}
+			loggedSetsMu.Unlock()
+
 			return c.JSON(http.StatusForbidden, map[string]string{"error": "client certificate SAN not allowed"})
 		}
 	}
